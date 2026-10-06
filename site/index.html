@@ -260,7 +260,7 @@
     term.write('\x1b[2m' + t('loading') + '\x1b[0m');
     py = await loadPyodide();
     for (const f of ['fslab.py', 'webcmds.py']) {
-      py.FS.writeFile('/home/pyodide/' + f, await (await fetch(f)).text());
+      py.FS.writeFile('/home/pyodide/' + f, await (await fetch(f, { cache: 'no-cache' })).text());
     }
     py.FS.mkdir('/lab');
     py.FS.mount(py.FS.filesystems.IDBFS, {}, '/lab');   // the lab survives page reloads
