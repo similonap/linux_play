@@ -260,11 +260,12 @@
   async function boot() {
     term.write('\x1b[2m' + t('loading') + '\x1b[0m');
     py = await loadPyodide();
+    py.FS.mkdir('/fslab_src');          // code lives outside /home, which becomes the lab
     for (const f of ['fslab.py', 'webcmds.py']) {
-      py.FS.writeFile('/home/pyodide/' + f, await (await fetch(f, { cache: 'no-cache' })).text());
+      py.FS.writeFile('/fslab_src/' + f, await (await fetch(f, { cache: 'no-cache' })).text());
     }
-    py.FS.mkdir('/lab');
-    py.FS.mount(py.FS.filesystems.IDBFS, {}, '/lab');   // the lab survives page reloads
+    py.runPython("import os; os.chdir('/')");   // /home/pyodide is about to be hidden by the mount
+    py.FS.mount(py.FS.filesystems.IDBFS, {}, '/home');  // the lab (/home/work, /home/stock) survives page reloads
     await new Promise((res, rej) => py.FS.syncfs(true, e => e ? rej(e) : res()));
 
     const seed = /^\d+$/.test(params.get('seed') || '') ? params.get('seed') : 'None';
@@ -272,9 +273,9 @@
     window.askConfirm = q => window.confirm(q);
     py.runPython(`
 import sys, js
-sys.path.insert(0, '/home/pyodide')
+sys.path.insert(0, '/fslab_src')
 import webcmds
-session = webcmds.Session('/lab', lambda q: js.askConfirm(q), seed=${seed}, level=${level}, lang='${lang}')
+session = webcmds.Session('/home', lambda q: js.askConfirm(q), seed=${seed}, level=${level}, lang='${lang}')
 webcmds.WIDTH = ${term.cols}
 `);
     session = py.globals.get('session');
