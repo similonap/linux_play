@@ -1,5 +1,5 @@
 import { Lab, State } from './lab';
-import { Spec } from './generator';
+import { Spec, Options, presetOptions, sameOptions, isCustom } from './generator';
 import { Lang, setLang, tr } from './i18n';
 import { bold, dim } from './ansi';
 
@@ -9,11 +9,16 @@ export interface SessionOpts {
   store: Store;
   confirm: (q: string) => boolean;
   seed?: number;
-  level?: number;
+  /** Settings for new exercises. */
+  options?: Options;
+  /** The settings came from the URL: a saved exercise with other settings is replaced. */
+  explicit?: boolean;
   lang?: Lang;
 }
 
-export interface Info { seed: number; level: number; commands: number; violations: number; solved: boolean }
+export interface Info {
+  seed: number; difficulty: number; custom: boolean; commands: number; violations: number; solved: boolean;
+}
 
 const SAVE_VERSION = 2;
 
@@ -37,10 +42,11 @@ export class Session {
       }
     } catch { loaded = false; }
 
-    const stale = loaded && o.seed !== undefined && this.lab.spec.seed !== o.seed;
+    this.lab.options = o.options ?? presetOptions(2);
+    const stale = loaded && ((o.seed !== undefined && this.lab.spec.seed !== o.seed)
+      || (o.explicit === true && !sameOptions(this.lab.spec.options!, this.lab.options)));
     if (!loaded || stale) {
-      const level = o.level && [1, 2, 3].includes(o.level) ? o.level : 2;
-      this.lab.startNew(o.seed ?? 1 + Math.floor(Math.random() * 99999), level);
+      this.lab.startNew(o.seed ?? 1 + Math.floor(Math.random() * 99999), this.lab.options);
       loaded = false;
     }
     this.resumed = loaded;
@@ -55,6 +61,15 @@ export class Session {
   }
 
   setLang(l: Lang): void { setLang(l); }
+
+  /** Settings for the next `new` / start a new exercise with them right now. */
+  setOptions(options: Options): void { this.lab.options = options; }
+  startNew(options: Options): string {
+    this.lab.options = options;
+    this.lab.startNew(1 + Math.floor(Math.random() * 99999), options);
+    this.resumed = false;
+    return this.banner();
+  }
   setWidth(cols: number): void { this.lab.width = cols; }
 
   banner(): string {
@@ -74,7 +89,8 @@ export class Session {
 
   info(): Info {
     const { spec, state } = this.lab;
-    return { seed: spec.seed, level: spec.level, commands: state.commands, violations: state.violations, solved: state.solved };
+    return { seed: spec.seed, difficulty: spec.level, custom: !!spec.options && isCustom(spec.options),
+      commands: state.commands, violations: state.violations, solved: state.solved };
   }
 }
 

@@ -8,7 +8,15 @@ in TypeScript (Vite + xterm.js) en wordt gehost op GitHub Pages; er is geen serv
 - Standaard **Nederlands**, met een NL/EN-knop rechtsboven (`?lang=en` werkt ook).
 - Het lab (`/home/student/work`, `/home/student/stock`) is een virtueel bestandssysteem in het
   geheugen en wordt in `localStorage` bewaard, dus een refresh gaat verder waar je was.
-- `?seed=4242` geeft iedereen dezelfde oefening, `?level=1|2|3` kiest de grootte.
+- **⚙ Instellingen**: kies een moeilijkheid (makkelijk / gemiddeld / moeilijk: de grootte van de
+  oefening plus welke onderdelen standaard aan staan) en vink daarna zelf aan wat je wilt oefenen:
+  kopiëren/verplaatsen, absolute paden, relatieve paden (`..`), `~`, `.` als bestemming,
+  wildcard `*`, wildcard `?`, verwijderen en de rmdir-regel. Aanmaken (`mkdir`, `touch`) en
+  navigeren zit er altijd in. Je keuze wordt in de browser bewaard en gebruikt voor elke nieuwe oefening.
+- `?seed=4242` geeft iedereen dezelfde oefening. `?level=1|2|3` kiest de moeilijkheid en
+  `?features=copymove,abs,rel,home,dot,star,question,remove,rmdironly` (komma-gescheiden, enkel
+  wat je opsomt staat aan) kiest de onderdelen, bv. een link voor een les over wildcards:
+  `?level=1&features=copymove,star,question`.
 
 ## Een oefening
 
@@ -47,7 +55,7 @@ Een geweigerd commando wordt nooit uitgevoerd; overtredingen worden geteld en ge
 ```bash
 npm install
 npm run dev       # http://localhost:5173
-npm test          # vitest: genereert 180 oefeningen en lost ze allemaal op met enkel lab-commando's
+npm test          # vitest: genereert honderden oefeningen (alle moeilijkheden en willekeurige combinaties van onderdelen) en lost ze op met enkel lab-commando's
 npm run build     # tsc + vite build naar dist/
 ```
 

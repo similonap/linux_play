@@ -3,12 +3,19 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { Session, Store } from './session';
-import { Lang, getLang, setLang } from './i18n';
+import { Lang, getLang, setLang, difficultyName } from './i18n';
+import { Options, Features, FEATURE_KEYS, FeatureKey, Difficulty, presetOptions, normalizeFeatures, isCustom } from './generator';
 
 const I18N: Record<Lang, Record<string, string>> = {
   nl: {
     btnTask: 'Opdracht', btnHint: 'Hint', btnTree: 'Tree', btnCheck: 'Controleer', btnNew: 'Nieuw',
-    btnNewTitle: 'een andere willekeurige oefening',
+    btnNewTitle: 'een andere willekeurige oefening (met je instellingen)',
+    btnSettings: '⚙ Instellingen',
+    setTitle: 'Instellingen', setDifficulty: 'Moeilijkheid', setFeatures: 'Wat wil je oefenen?',
+    setDiffHint: 'De moeilijkheid bepaalt de grootte van de oefening en welke onderdelen standaard aan staan.',
+    setFeaturesHint: 'Aanmaken (mkdir, touch) en navigeren (cd, ls, tree) zit er altijd in.',
+    setCancel: 'Annuleer', setStart: 'Start nieuwe oefening', custom: 'aangepast',
+    setConfirm: 'Je huidige oefening wordt vervangen. Doorgaan?',
     footCmds: "Commando's: ls pwd cd cp mv touch mkdir rm rmdir tree",
     footLab: 'Lab: task · check · hint · help · reset · new',
     footSaved: 'voortgang wordt in deze browser bewaard',
@@ -17,7 +24,13 @@ const I18N: Record<Lang, Record<string, string>> = {
   },
   en: {
     btnTask: 'Task', btnHint: 'Hint', btnTree: 'Tree', btnCheck: 'Check', btnNew: 'New',
-    btnNewTitle: 'a different random exercise',
+    btnNewTitle: 'a different random exercise (with your settings)',
+    btnSettings: '⚙ Settings',
+    setTitle: 'Settings', setDifficulty: 'Difficulty', setFeatures: 'What do you want to practise?',
+    setDiffHint: 'Difficulty sets the size of the exercise and which topics are on by default.',
+    setFeaturesHint: 'Creating (mkdir, touch) and navigating (cd, ls, tree) are always included.',
+    setCancel: 'Cancel', setStart: 'Start new exercise', custom: 'customised',
+    setConfirm: 'Your current exercise will be replaced. Continue?',
     footCmds: 'Commands: ls pwd cd cp mv touch mkdir rm rmdir tree',
     footLab: 'Lab: task · check · hint · help · reset · new',
     footSaved: 'progress is saved in this browser',
@@ -57,8 +70,30 @@ term.open($('term'));
 fit.fit();
 
 const num = (k: string) => (/^\d+$/.test(params.get(k) ?? '') ? Number(params.get(k)) : undefined);
+
+// ---- exercise settings: URL (?level=1-3&features=a,b) > saved in this browser > medium --------
+const OPT_KEY = 'fslab.options';
+function readOptions(): { options: Options; explicit: boolean } {
+  const d = num('level') ?? num('difficulty');
+  const list = params.get('features');
+  if (d !== undefined || list !== null) {
+    const difficulty = ([1, 2, 3].includes(d ?? 0) ? d : 2) as Difficulty;
+    if (list === null) return { options: presetOptions(difficulty), explicit: true };
+    const on = new Set(list.toLowerCase().split(',').map(x => x.trim()));
+    const features = Object.fromEntries(FEATURE_KEYS.map(k => [k, on.has(k.toLowerCase())])) as unknown as Features;
+    return { options: { difficulty, features: normalizeFeatures(features) }, explicit: true };
+  }
+  try {
+    const o = JSON.parse(localStorage.getItem(OPT_KEY) ?? 'null') as Options | null;
+    if (o && [1, 2, 3].includes(o.difficulty)) return { options: { difficulty: o.difficulty, features: normalizeFeatures(o.features) }, explicit: false };
+  } catch { /* use default */ }
+  return { options: presetOptions(2), explicit: false };
+}
+const initial = readOptions();
+let settings: Options = initial.options;
+
 const session = new Session({
-  store, confirm: q => window.confirm(q), seed: num('seed'), level: num('level'), lang,
+  store, confirm: q => window.confirm(q), seed: num('seed'), options: settings, explicit: initial.explicit, lang,
 });
 session.setWidth(term.cols);
 
@@ -71,7 +106,7 @@ hIdx = history.length;
 // ---- header chips / language ---------------------------------------------------------
 function renderInfo(): void {
   const s = session.info();
-  $('ex').innerHTML = `${t('exercise')} <b>#${s.seed}</b> · ${t('level')} ${s.level}`;
+  $('ex').innerHTML = `${t('exercise')} <b>#${s.seed}</b> · ${difficultyName(s.difficulty)}${s.custom ? ' (' + t('custom') + ')' : ''}`;
   $('cmds').innerHTML = `${t('commands')} <b>${s.commands}</b>`;
   $('viol').innerHTML = `${t('violations')} <b>${s.violations}</b>`;
   $('viol').className = 'chip' + (s.violations ? ' bad' : '');
@@ -186,11 +221,74 @@ document.querySelectorAll<HTMLElement>('.lang button').forEach(b => b.addEventLi
   session.setLang(l);
   try { localStorage.setItem('fslab.lang', l); } catch { /* ignore */ }
   applyLang();
+  if (dlg.open) renderSettings();
   term.clear();
   term.write('\x1b[2J\x1b[H' + session.banner());   // show the instructions in the new language
   newPrompt();
   term.focus();
 }));
+
+// ---- settings dialog ----------------------------------------------------------------
+const FEATURES: Record<FeatureKey, { nl: [string, string]; en: [string, string] }> = {
+  copyMove: { nl: ['Kopiëren en verplaatsen', 'cp en mv i.p.v. mkdir/touch (★)'], en: ['Copying and moving', 'cp and mv instead of mkdir/touch (★)'] },
+  abs: { nl: ['Absolute paden', 'beginnen met /'], en: ['Absolute paths', 'start with /'] },
+  rel: { nl: ['Relatieve paden', 'vanaf de huidige map, ook met ..'], en: ['Relative paths', 'from the current directory, also with ..'] },
+  home: { nl: ['~ (homemap)', 'paden die met ~ beginnen'], en: ['~ (home directory)', 'paths that start with ~'] },
+  dot: { nl: ['. als bestemming', 'cd naar de doelmap en dan cp/mv naar . (vraagt kopiëren/verplaatsen)'], en: ['. as destination', 'cd to the target directory, then cp/mv to . (needs copying/moving)'] },
+  star: { nl: ['Wildcard *', 'alle bestanden die beginnen of eindigen met …'], en: ['Wildcard *', 'all files that start or end with …'] },
+  question: { nl: ['Wildcard ?', 'precies één willekeurig teken'], en: ['Wildcard ?', 'exactly one arbitrary character'] },
+  remove: { nl: ['Verwijderen', 'rm en rm -r'], en: ['Deleting', 'rm and rm -r'] },
+  rmdirOnly: { nl: ['Lege mappen enkel met rmdir', 'rm mag dan niet (vraagt verwijderen)'], en: ['Empty directories only with rmdir', 'rm is not allowed then (needs deleting)'] },
+};
+let draft2: Options = settings;
+const dlg = $('settings') as HTMLDialogElement;
+
+function renderSettings(): void {
+  const seg = $('set-diff');
+  seg.innerHTML = '';
+  for (const d of [1, 2, 3] as Difficulty[]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = difficultyName(d) + (d === draft2.difficulty && isCustom(draft2) ? ' *' : '');
+    b.className = d === draft2.difficulty ? 'on' : '';
+    b.onclick = () => { draft2 = presetOptions(d); renderSettings(); };
+    seg.appendChild(b);
+  }
+  const box = $('set-features');
+  box.innerHTML = '';
+  for (const k of FEATURE_KEYS) {
+    const [title, sub] = FEATURES[k][getLang()];
+    const off = (k === 'dot' && !draft2.features.copyMove) || (k === 'rmdirOnly' && !draft2.features.remove);
+    const label = document.createElement('label');
+    label.className = 'feat' + (off ? ' off' : '');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = draft2.features[k] && !off;
+    cb.disabled = off;
+    cb.onchange = () => {
+      draft2 = { ...draft2, features: normalizeFeatures({ ...draft2.features, [k]: cb.checked }) };
+      renderSettings();
+    };
+    const text = document.createElement('span');
+    text.innerHTML = `${title}<small>${sub}</small>`;
+    label.append(cb, text);
+    box.appendChild(label);
+  }
+}
+
+$('btn-settings').addEventListener('click', () => { draft2 = settings; renderSettings(); dlg.showModal(); });
+$('set-cancel').addEventListener('click', () => dlg.close());
+$('set-start').addEventListener('click', () => {
+  if (session.info().commands > 0 && !window.confirm(t('setConfirm'))) return;
+  settings = draft2;
+  try { localStorage.setItem(OPT_KEY, JSON.stringify(settings)); } catch { /* ignore */ }
+  dlg.close();
+  term.clear();
+  term.write('\x1b[2J\x1b[H' + session.startNew(settings));
+  renderInfo();
+  newPrompt();
+  term.focus();
+});
 
 // ---- go --------------------------------------------------------------------------------
 applyLang();

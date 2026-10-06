@@ -3,11 +3,11 @@
  * All text shown to the student goes through tr(english, dutch).
  */
 import { VFS, basename, dirname, isAbs, join, normpath } from './vfs';
-import { Spec, Target, Group, generate } from './generator';
+import { Spec, Target, Group, Options, generate, presetOptions, isCustom, Difficulty } from './generator';
 import { COMMANDS, Ctx, isDotName } from './commands';
 import { expandGlob, tokenize } from './shell';
 import { bold, cyan, dim, green, magenta, red, yellow } from './ansi';
-import { tr } from './i18n';
+import { tr, difficultyName } from './i18n';
 
 export const ROOT = '/home/student';
 export const ALLOWED = ['ls', 'pwd', 'cd', 'cp', 'mv', 'touch', 'mkdir', 'rm', 'rmdir', 'tree'];
@@ -80,13 +80,17 @@ export class Lab {
 
   restore(spec: Spec, state: State, fsData: unknown): void {
     this.spec = spec;
+    if (!spec.options) spec.options = presetOptions((spec.level as Difficulty) ?? 2); // saved by an older version
     this.state = state;
     this.fs = VFS.fromJSON(fsData);
     this.cwd = this.prev = ROOT;
   }
 
-  startNew(seed: number, level: number): void {
-    this.spec = generate(seed, level);
+  /** Settings used for the next `new` exercise (the Session keeps this in sync with the UI). */
+  options: Options = presetOptions(2);
+
+  startNew(seed: number, options: Options): void {
+    this.spec = generate(seed, options);
     this.fs = new VFS();
     this.fs.mkdirp(ROOT + '/work');
     this.fs.mkdirp(ROOT + '/stock');
@@ -374,9 +378,8 @@ export class Lab {
       const q = tr(`This will ${what} and wipe ~/work and ~/stock. Continue?`,
         `Dit gaat ${what} en ~/work en ~/stock wissen. Doorgaan?`);
       if (!this.confirm(q)) { this.print(tr('cancelled', 'geannuleerd')); return; }
-      const level = this.spec.level;
       const seed = cmd === 'reset' ? this.spec.seed : 1 + Math.floor(Math.random() * 99999);
-      this.startNew(seed, level);
+      this.startNew(seed, cmd === 'reset' ? this.spec.options! : this.options);
       this.showTask();
     }
   }
@@ -432,7 +435,8 @@ export class Lab {
   showTask(): void {
     const s = this.spec;
     this.print();
-    this.print(bold(tr(`═══ Exercise #${s.seed} (level ${s.level}) ═══`, `═══ Oefening #${s.seed} (niveau ${s.level}) ═══`)));
+    const level = difficultyName(s.level) + (s.options && isCustom(s.options) ? tr(', customised', ', aangepast') : '');
+    this.print(bold(tr(`═══ Exercise #${s.seed} (${level}) ═══`, `═══ Oefening #${s.seed} (${level}) ═══`)));
     this.print(tr(`Lab directory: ${ROOT}   (shown as ~ in the prompt)`, `Labmap: ${ROOT}   (in de prompt weergegeven als ~)`));
     this.print(tr('Make ~/work look EXACTLY like this - nothing more, nothing less:',
       'Zorg dat ~/work er EXACT zo uitziet - niets meer, niets minder:'));
@@ -468,21 +472,26 @@ export class Lab {
       for (const g of groups) this.print('  ' + groupText(g));
     }
 
-    this.print();
-    this.print(bold(tr('Remove from ~/work', 'Verwijder uit ~/work')) +
-      tr(' (everything that is not in the picture above must go):', ' (alles wat niet in bovenstaande afbeelding staat moet weg):'));
-    for (const [rel, j] of Object.entries(this.junk)) {
-      if (j.child) continue;
-      const what = j.type === 'file' ? tr('file', 'bestand')
-        : j.nonempty ? tr('directory with stuff inside', 'map met inhoud') : tr('empty directory', 'lege map');
-      let extra = '';
-      if (j.rmdirOnly) extra += '  ' + red(tr('rmdir only - no rm!', 'enkel rmdir - geen rm!'));
-      if (j.style === 'abs') extra += '  ' + cyan(tr('◆ remove it with an ABSOLUTE path', '◆ verwijder het met een ABSOLUUT pad'));
-      if (j.style === 'rel') extra += '  ' + magenta(tr('◆ remove it with a RELATIVE path', '◆ verwijder het met een RELATIEF pad'));
-      if (j.style === 'home') extra += '  ' + cyan(tr('◆ remove it with a path that starts with ~', '◆ verwijder het met een pad dat met ~ begint'));
-      this.print('  ' + ('~/' + rel + (j.type === 'dir' ? '/' : '')).padEnd(30) + ' ' + what + extra);
+    const junk = Object.entries(this.junk);
+    if (junk.length) {
+      this.print();
+      this.print(bold(tr('Remove from ~/work', 'Verwijder uit ~/work')) +
+        tr(' (everything that is not in the picture above must go):', ' (alles wat niet in bovenstaande afbeelding staat moet weg):'));
+      for (const [rel, j] of junk) {
+        if (j.child) continue;
+        const what = j.type === 'file' ? tr('file', 'bestand')
+          : j.nonempty ? tr('directory with stuff inside', 'map met inhoud') : tr('empty directory', 'lege map');
+        let extra = '';
+        if (j.rmdirOnly) extra += '  ' + red(tr('rmdir only - no rm!', 'enkel rmdir - geen rm!'));
+        if (j.style === 'abs') extra += '  ' + cyan(tr('◆ remove it with an ABSOLUTE path', '◆ verwijder het met een ABSOLUUT pad'));
+        if (j.style === 'rel') extra += '  ' + magenta(tr('◆ remove it with a RELATIVE path', '◆ verwijder het met een RELATIEF pad'));
+        if (j.style === 'home') extra += '  ' + cyan(tr('◆ remove it with a path that starts with ~', '◆ verwijder het met een pad dat met ~ begint'));
+        this.print('  ' + ('~/' + rel + (j.type === 'dir' ? '/' : '')).padEnd(30) + ' ' + what + extra);
+      }
     }
-    if (Object.values(this.targets).some(n => n.mode === 'restricted' && n.source!.startsWith('work/'))) {
+    const targets = Object.values(this.targets);
+    const usesStock = targets.some(n => n.mode === 'restricted');
+    if (targets.some(n => n.mode === 'restricted' && n.source!.startsWith('work/'))) {
       this.print('  ' + dim(tr('(items marked ★ that currently live inside ~/work must end up at their new place only)',
         '(items met ★ die nu in ~/work staan, mogen enkel op hun nieuwe plaats terechtkomen)')));
     }
@@ -490,22 +499,32 @@ export class Lab {
     this.print(bold(tr('Rules', 'Regels')));
     this.print(tr(`  • Commands: ${ALLOWED.join(' ')}   (type \`help\` for the lab commands)`,
       `  • Commando's: ${ALLOWED.join(' ')}   (typ \`help\` voor de lab-commando's)`));
-    this.print('  • ' + yellow('★') + tr(' items may NOT be made with mkdir/touch - bring them over with cp or mv.',
-      ' items mag je NIET met mkdir/touch maken - breng ze over met cp of mv.'));
-    this.print('  • ' + cyan('◆') + tr(' items must be created/removed with the stated kind of path (~/... is absolute, and also a path "with ~").',
-      ' items moet je aanmaken/verwijderen met het opgegeven soort pad (~/... is absoluut, en ook een pad "met ~").'));
+    if (usesStock) {
+      this.print('  • ' + yellow('★') + tr(' items may NOT be made with mkdir/touch - bring them over with cp or mv.',
+        ' items mag je NIET met mkdir/touch maken - breng ze over met cp of mv.'));
+    }
+    if (targets.some(n => n.style && n.style !== 'dot') || junk.some(([, j]) => j.style)) {
+      this.print('  • ' + cyan('◆') + tr(' items must be created/removed with the stated kind of path (~/... is absolute, and also a path "with ~").',
+        ' items moet je aanmaken/verwijderen met het opgegeven soort pad (~/... is absoluut, en ook een pad "met ~").'));
+    }
     if (groups.length) {
       this.print('  • ' + tr('Files marked WILDCARD may only be copied/moved through a pattern with * or ? (e.g. mv ~/stock/ab* ~/work/x).',
         'Bestanden met WILDCARD mag je enkel kopiëren/verplaatsen met een patroon met * of ? (bv. mv ~/stock/ab* ~/work/x).'));
     }
-    if (Object.values(this.targets).some(n => n.style === 'dot')) {
+    if (targets.some(n => n.style === 'dot')) {
       this.print('  • ' + tr('"use . as destination" means: cd into the target directory, then e.g. mv ~/stock/file . (. is the current directory).',
         '"gebruik . als bestemming" betekent: ga met cd naar de doelmap en doe dan bv. mv ~/stock/bestand . (. is de huidige map).'));
     }
-    this.print('  • ' + tr('Directories marked ', 'Mappen met ') + red(tr('rmdir only', 'enkel rmdir')) +
-      tr(' may not be removed with rm.', ' mag je niet met rm verwijderen.'));
-    this.print(tr('  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.',
-      '  • ~/stock mag in elke toestand blijven. Een regel breken blokkeert het commando en wordt geteld.'));
+    if (junk.some(([, j]) => j.rmdirOnly)) {
+      this.print('  • ' + tr('Directories marked ', 'Mappen met ') + red(tr('rmdir only', 'enkel rmdir')) +
+        tr(' may not be removed with rm.', ' mag je niet met rm verwijderen.'));
+    }
+    if (usesStock || groups.length) {
+      this.print(tr('  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.',
+        '  • ~/stock mag in elke toestand blijven. Een regel breken blokkeert het commando en wordt geteld.'));
+    } else {
+      this.print(tr('  • Breaking a rule blocks the command and is counted.', '  • Een regel breken blokkeert het commando en wordt geteld.'));
+    }
     this.print('  • ' + tr('Type ', 'Typ ') + bold('check') + tr(' when you think you are done.', ' wanneer je denkt dat je klaar bent.'));
     this.print();
   }

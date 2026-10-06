@@ -18,11 +18,27 @@
   <button class="act" data-cmd="tree ~" data-i18n="btnTree"></button>
   <button class="act primary" data-cmd="check" data-i18n="btnCheck"></button>
   <button class="act" data-cmd="new" data-i18n="btnNew" data-i18n-title="btnNewTitle"></button>
+  <button id="btn-settings" data-i18n="btnSettings"></button>
   <span class="lang" role="group" aria-label="Taal / Language">
     <button id="lang-nl" data-lang="nl">NL</button><button id="lang-en" data-lang="en">EN</button>
   </span>
 </header>
 <div id="term"></div>
+<dialog id="settings">
+  <form method="dialog" id="settings-form">
+    <h2 data-i18n="setTitle"></h2>
+    <h3 data-i18n="setDifficulty"></h3>
+    <div class="seg" id="set-diff"></div>
+    <p class="hint" data-i18n="setDiffHint"></p>
+    <h3 data-i18n="setFeatures"></h3>
+    <p class="hint" data-i18n="setFeaturesHint"></p>
+    <div id="set-features"></div>
+    <div class="actions">
+      <button type="button" id="set-cancel" data-i18n="setCancel"></button>
+      <button type="button" id="set-start" class="primary" data-i18n="setStart"></button>
+    </div>
+  </form>
+</dialog>
 <footer>
   <span data-i18n="footCmds"></span>
   <span data-i18n="footLab"></span>

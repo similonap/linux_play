@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { generate } from './generator';
+import { generate, presetOptions, normalizeFeatures, FEATURE_KEYS, Options, Features, Difficulty } from './generator';
+import { Rng } from './rng';
 import { Session, Store } from './session';
 import { ROOT } from './lab';
 import { setLang } from './i18n';
@@ -7,8 +8,10 @@ import { setLang } from './i18n';
 const memStore = (): Store => { let d: string | null = null; return { load: () => d, save: x => { d = x; } }; };
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 
-function newSession(seed: number, level: number, lang: 'nl' | 'en' = 'en') {
-  return new Session({ store: memStore(), confirm: () => true, seed, level, lang });
+const opts = (o: number | Options): Options => (typeof o === 'number' ? presetOptions(o as Difficulty) : o);
+
+function newSession(seed: number, level: number | Options, lang: 'nl' | 'en' = 'en') {
+  return new Session({ store: memStore(), confirm: () => true, seed, options: opts(level), lang });
 }
 
 /** Solve an exercise the way a student would, using only lab commands. */
@@ -44,14 +47,14 @@ function solve(s: Session): void {
 
 describe('generator', () => {
   it('is deterministic per seed', () => {
-    const a = generate(4242, 2), b = generate(4242, 2);
+    const a = generate(4242, presetOptions(2)), b = generate(4242, presetOptions(2));
     expect(Object.keys(a.targets)).toEqual(Object.keys(b.targets));
     expect(Object.keys(a.junk)).toEqual(Object.keys(b.junk));
   });
 
   it('produces valid exercises for many seeds and levels', () => {
     for (const level of [1, 2, 3]) for (let seed = 1; seed <= 150; seed++) {
-      const s = generate(seed, level);
+      const s = generate(seed, presetOptions(level as Difficulty));
       expect(Object.keys(s.targets).length).toBeGreaterThan(3);
       expect(Object.values(s.junk).some(j => j.rmdirOnly)).toBe(true);
     }
@@ -64,17 +67,19 @@ describe('wildcards, ~ and .', () => {
     throw new Error('no such exercise');
   };
 
-  it('levels 2 and 3 always have a wildcard group; level 3 usually uses ~ and . too', () => {
-    let dot = 0, home = 0;
-    for (let seed = 1; seed <= 100; seed++) {
-      expect(newSession(seed, 2).lab.spec.groups!.length).toBe(1);
-      const l3 = newSession(seed, 3).lab.spec;
-      expect(l3.groups!.length).toBeGreaterThanOrEqual(1);
-      if (Object.values(l3.targets).some(n => n.style === 'dot')) dot++;
-      if (Object.values(l3.targets).some(n => n.style === 'home')) home++;
+  it('the difficulty presets switch the expected topics on', () => {
+    for (let seed = 1; seed <= 60; seed++) {
+      const easy = newSession(seed, 1).lab.spec, med = newSession(seed, 2).lab.spec, hard = newSession(seed, 3).lab.spec;
+      expect(easy.groups).toHaveLength(0);
+      expect(Object.values(easy.targets).some(n => n.style === 'home' || n.style === 'dot')).toBe(false);
+      expect(med.groups!.map(g => g.kind)).toHaveLength(1);
+      expect(med.groups![0].kind).not.toBe('single');
+      expect(Object.values(med.targets).some(n => n.style === 'home')).toBe(true);
+      expect(hard.groups!.map(g => g.kind)).toContain('single');
+      expect(hard.groups).toHaveLength(2);
+      expect(Object.values(hard.targets).some(n => n.style === 'dot')).toBe(true);
+      expect(Object.values(hard.targets).some(n => n.style === 'home')).toBe(true);
     }
-    expect(dot).toBeGreaterThan(70);
-    expect(home).toBeGreaterThan(95);
   });
 
   it('group files cannot be moved one by one, but can with the pattern', () => {
@@ -148,6 +153,69 @@ describe('wildcards, ~ and .', () => {
   });
 });
 
+describe('custom settings', () => {
+  const randomFeatures = (rng: Rng): Features =>
+    normalizeFeatures(Object.fromEntries(FEATURE_KEYS.map(k => [k, rng.next() < 0.5])) as unknown as Features);
+
+  it('every combination of topics generates and can be solved; switched-off topics never appear', () => {
+    const rng = new Rng(99);
+    const combos: Features[] = [
+      normalizeFeatures({ copyMove: false, abs: false, rel: false, home: false, dot: false, star: false, question: false, remove: false, rmdirOnly: false }),
+      ...Array.from({ length: 150 }, () => randomFeatures(rng)),
+    ];
+    combos.forEach((features, i) => {
+      const difficulty = ((i % 3) + 1) as Difficulty;
+      const s = newSession(i + 1, { difficulty, features });
+      const { targets, junk, groups = [] } = s.lab.spec;
+      const label = `${JSON.stringify(features)} d${difficulty}`;
+      const t = Object.values(targets);
+      expect(t.some(n => n.mode === 'restricted' && !n.glob), label).toBe(features.copyMove);
+      expect(t.some(n => n.style === 'abs'), label).toBe(features.abs);
+      expect(t.some(n => n.style === 'rel'), label).toBe(features.rel);
+      expect(t.some(n => n.style === 'home'), label).toBe(features.home);
+      expect(t.some(n => n.style === 'dot'), label).toBe(features.dot);
+      expect(groups.some(g => g.kind !== 'single'), label).toBe(features.star);
+      expect(groups.some(g => g.kind === 'single'), label).toBe(features.question);
+      expect(Object.keys(junk).length > 0, label).toBe(features.remove);
+      expect(Object.values(junk).some(j => j.rmdirOnly), label).toBe(features.rmdirOnly);
+      solve(s);
+      const out = strip(s.run('check'));
+      expect(out, `${label}\n${out}`).toContain('SOLVED');
+      expect(s.info().violations, label).toBe(0);
+    });
+  });
+
+  it('dot needs copy/move and the rmdir rule needs deleting', () => {
+    const f = normalizeFeatures({ ...presetOptions(3).features, copyMove: false, remove: false });
+    expect(f.dot).toBe(false);
+    expect(f.rmdirOnly).toBe(false);
+  });
+
+  it('a saved exercise keeps its own settings; `new` uses the current ones', () => {
+    const store = memStore();
+    const a = new Session({ store, confirm: () => true, seed: 5, options: presetOptions(3), lang: 'en' });
+    a.setOptions({ difficulty: 1, features: { ...presetOptions(1).features, remove: false, rmdirOnly: false } });
+    expect(a.lab.spec.options!.difficulty).toBe(3);
+    a.run('new');
+    expect(a.lab.spec.options!.difficulty).toBe(1);
+    expect(Object.keys(a.lab.spec.junk)).toHaveLength(0);
+    a.run('reset');
+    expect(a.lab.spec.options!.features.remove).toBe(false);
+    expect(strip(a.run('task'))).not.toContain('Remove from');
+    expect(a.info().custom).toBe(true);
+  });
+
+  it('settings from the URL replace a saved exercise with different settings', () => {
+    const store = memStore();
+    new Session({ store, confirm: () => true, seed: 5, options: presetOptions(2), lang: 'en' });
+    const same = new Session({ store, confirm: () => true, options: presetOptions(2), explicit: true, lang: 'en' });
+    expect(same.resumed).toBe(true);
+    const other = new Session({ store, confirm: () => true, options: presetOptions(3), explicit: true, lang: 'en' });
+    expect(other.resumed).toBe(false);
+    expect(other.lab.spec.options!.difficulty).toBe(3);
+  });
+});
+
 describe('lab', () => {
   it('every generated exercise can be solved with the allowed commands, without violations', () => {
     for (const level of [1, 2, 3]) for (let seed = 1; seed <= 60; seed++) {
@@ -213,7 +281,7 @@ describe('lab', () => {
 
   it('resumes from storage and speaks Dutch by default', () => {
     const store = memStore();
-    const a = new Session({ store, confirm: () => true, seed: 7, level: 1, lang: 'nl' });
+    const a = new Session({ store, confirm: () => true, seed: 7, options: presetOptions(1), lang: 'nl' });
     a.run('touch work/zzz');
     const b = new Session({ store, confirm: () => true, lang: 'nl' });
     expect(b.resumed).toBe(true);
@@ -225,7 +293,7 @@ describe('lab', () => {
   });
 
   it('new/reset ask for confirmation', () => {
-    const s = new Session({ store: memStore(), confirm: () => false, seed: 3, level: 1, lang: 'en' });
+    const s = new Session({ store: memStore(), confirm: () => false, seed: 3, options: presetOptions(1), lang: 'en' });
     expect(strip(s.run('new'))).toContain('cancelled');
     expect(s.info().seed).toBe(3);
   });
