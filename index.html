@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linux Lab</title>
+</head>
+<body>
+<header>
+  <h1>Linux Lab</h1>
+  <span class="chip" id="ex"></span>
+  <span class="chip" id="cmds"></span>
+  <span class="chip" id="viol"></span>
+  <span class="chip" id="status"></span>
+  <span class="spacer"></span>
+  <button class="act" data-cmd="task" data-i18n="btnTask"></button>
+  <button class="act" data-cmd="hint" data-i18n="btnHint"></button>
+  <button class="act" data-cmd="tree ~" data-i18n="btnTree"></button>
+  <button class="act primary" data-cmd="check" data-i18n="btnCheck"></button>
+  <button class="act" data-cmd="new" data-i18n="btnNew" data-i18n-title="btnNewTitle"></button>
+  <span class="lang" role="group" aria-label="Taal / Language">
+    <button id="lang-nl" data-lang="nl">NL</button><button id="lang-en" data-lang="en">EN</button>
+  </span>
+</header>
+<div id="term"></div>
+<footer>
+  <span data-i18n="footCmds"></span>
+  <span data-i18n="footLab"></span>
+  <span data-i18n="footSaved"></span>
+</footer>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
