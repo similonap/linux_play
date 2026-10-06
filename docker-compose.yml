@@ -1,0 +1,14 @@
+services:
+  fslab:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      FSLAB_TEACHER_KEY: change-me      # /teacher?key=change-me
+      FSLAB_LEVEL: "2"                  # default size for new students
+      # FSLAB_SEED: "4242"              # same exercise for everyone
+    volumes:
+      - fslab-labs:/labs                # student labs survive restarts
+    restart: unless-stopped
+volumes:
+  fslab-labs:

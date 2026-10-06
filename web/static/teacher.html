@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab Dashboard</title>
+<style>
+  :root { --bg: #0f1115; --panel: #171a21; --line: #262a33; --text: #d7dae0; --muted: #8b919c;
+    --accent: #5aa9ff; --ok: #3fbf7f; --bad: #ef6b6b; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 18px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 16px; }
+  table { border-collapse: collapse; width: 100%; background: var(--panel); border: 1px solid var(--line); }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:hover td { background: #1c2029; }
+  .ok { color: var(--ok); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; } .muted { color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #444; margin-right: 6px; }
+  .dot.on { background: var(--ok); }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  pre { background: var(--panel); border: 1px solid var(--line); padding: 12px; overflow: auto; max-height: 60vh;
+    font-size: 12px; white-space: pre-wrap; }
+  #err { color: var(--bad); }
+  .share { margin: 0 0 16px; color: var(--muted); } .share code { color: var(--text); }
+</style>
+</head>
+<body>
+<h1>Linux Lab · dashboard</h1>
+<p class="sub">Refreshes every 5 seconds. <span id="err"></span></p>
+<p class="share">Share with students: <code id="share"></code> (add <code>?seed=4242</code> or <code>?level=3</code> to fix the exercise for everyone who opens that link)</p>
+<table>
+  <thead><tr><th></th><th>Name</th><th>Exercise</th><th>Items</th><th>Commands</th><th>Violations</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<h2 id="logTitle" style="font-size:15px;margin-top:22px;display:none"></h2>
+<pre id="log" style="display:none"></pre>
+<script>
+  const key = new URLSearchParams(location.search).get('key') || '';
+  document.getElementById('share').textContent = location.origin + '/';
+  const ago = t => { if (!t) return '—'; const s = Math.round(Date.now()/1000 - t);
+    return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s/60)} min ago` : `${Math.round(s/3600)} h ago`; };
+  const esc = s => String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+  async function load() {
+    try {
+      const r = await fetch(`/api/teacher/sessions?key=${encodeURIComponent(key)}`);
+      if (!r.ok) { document.getElementById('err').textContent = await r.text(); return; }
+      document.getElementById('err').textContent = '';
+      const rows = await r.json();
+      document.getElementById('rows').innerHTML = rows.map(s => `
+        <tr>
+          <td><span class="dot ${s.online ? 'on' : ''}"></span></td>
+          <td>${esc(s.name || 'anonymous')}</td>
+          <td>${s.seed ? `#${s.seed} · L${s.level}` : '<span class="muted">—</span>'}</td>
+          <td>${s.targets}</td>
+          <td>${s.commands}</td>
+          <td class="${s.violations ? 'bad' : ''}">${s.violations}</td>
+          <td class="${s.solved ? 'ok' : 'muted'}">${s.solved ? 'solved ✔' : 'working'}</td>
+          <td class="muted">${ago(s.last_seen)}</td>
+          <td><a href="#" onclick="showLog('${s.sid}', '${esc(s.name || 'anonymous')}'); return false">log</a></td>
+        </tr>`).join('') || '<tr><td colspan="9" class="muted">No students yet.</td></tr>';
+    } catch (e) { document.getElementById('err').textContent = String(e); }
+  }
+  async function showLog(sid, name) {
+    const r = await fetch(`/api/teacher/log/${sid}?key=${encodeURIComponent(key)}`);
+    document.getElementById('logTitle').textContent = `Command log · ${name}`;
+    document.getElementById('logTitle').style.display = '';
+    const pre = document.getElementById('log'); pre.style.display = ''; pre.textContent = await r.text();
+    pre.scrollIntoView({ behavior: 'smooth' });
+  }
+  load(); setInterval(load, 5000);
+</script>
+</body>
+</html>
