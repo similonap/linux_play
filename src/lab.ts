@@ -3,8 +3,8 @@
  * All text shown to the student goes through tr(english, dutch).
  */
 import { VFS, basename, dirname, isAbs, join, normpath } from './vfs';
-import { Spec, Target, generate } from './generator';
-import { COMMANDS, Ctx } from './commands';
+import { Spec, Target, Group, generate } from './generator';
+import { COMMANDS, Ctx, isDotName } from './commands';
 import { expandGlob, tokenize } from './shell';
 import { bold, cyan, dim, green, magenta, red, yellow } from './ansi';
 import { tr } from './i18n';
@@ -25,18 +25,27 @@ export interface State {
 
 interface Vet { ok: boolean; msg: string | null; violation: boolean }
 
-const pathStyle = (arg: string): 'abs' | 'rel' => (arg.startsWith('/') ? 'abs' : 'rel');
+/** One command-line argument after expansion, plus how the student typed it. */
+export interface Arg { value: string; raw: string; globbed: boolean }
+
+/** Which kinds of path an argument counts as (a path can be several: ~/x is both abs and home). */
+function usedStyles(a: Arg): Set<string> {
+  const s = new Set<string>([a.value.startsWith('/') ? 'abs' : 'rel']);
+  if (a.raw.startsWith('~')) s.add('home');
+  if (a.raw === '.') s.add('dot');
+  return s;
+}
 
 /** Separate option tokens from path tokens (stops at '--'). */
-function splitOpts(args: string[]): { opts: string[]; paths: string[] } {
+function splitOpts(args: Arg[]): { opts: string[]; pa: Arg[] } {
   const opts: string[] = [];
-  const paths: string[] = [];
+  const pa: Arg[] = [];
   for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === '--') { paths.push(...args.slice(i + 1)); break; }
-    if (a.startsWith('-') && a.length > 1) opts.push(a); else paths.push(a);
+    const a = args[i].value;
+    if (a === '--') { pa.push(...args.slice(i + 1)); break; }
+    if (a.startsWith('-') && a.length > 1) opts.push(a); else pa.push(args[i]);
   }
-  return { opts, paths };
+  return { opts, pa };
 }
 
 function hasFlag(opts: string[], ...names: string[]): boolean {
@@ -105,6 +114,9 @@ export class Lab {
       }
     }
     for (const [rel, j] of Object.entries(this.junk)) make(rel, j.type, 'junk\n');
+    for (const g of this.spec.groups ?? []) {
+      for (const d of g.decoys) make(`${g.parent}/${d}`, 'file', 'Not part of the group: leave this one in ~/stock.\n');
+    }
   }
 
   // ---- paths -----------------------------------------------------------------
@@ -120,11 +132,12 @@ export class Lab {
   prompt(): string { return `student@lab:${this.disp(this.cwd)}$ `; }
 
   // ---- rule checking ---------------------------------------------------------
-  vet(cmd: string, args: string[]): Vet {
+  vet(cmd: string, args: Arg[]): Vet {
     const ok: Vet = { ok: true, msg: null, violation: false };
     const block = (msg: string): Vet => ({ ok: false, msg, violation: false });
     const violate = (msg: string): Vet => ({ ok: false, msg, violation: true });
-    const { opts, paths } = splitOpts(args);
+    const { opts, pa } = splitOpts(args);
+    const paths = pa.map(a => a.value);
     const protectedPaths = new Set([ROOT, ROOT + '/work', ROOT + '/stock']);
 
     for (let i = 0; i < paths.length; i++) {
@@ -143,72 +156,73 @@ export class Lab {
 
     if (cmd === 'mkdir') {
       const parents = hasFlag(opts, 'p', 'parents');
-      for (const p of paths) {
-        const full = this.resolve(p);
+      for (const a of pa) {
+        const full = this.resolve(a.value);
         const created = [full];
         if (parents) {
-          let a = dirname(full);
-          while (this.inside(a) && !this.fs.exists(a)) { created.push(a); a = dirname(a); }
+          let d = dirname(full);
+          while (this.inside(d) && !this.fs.exists(d)) { created.push(d); d = dirname(d); }
         }
         for (const cr of created) {
-          const v = this.checkCreation(cr, pathStyle(p), 'mkdir');
+          const v = this.checkCreation(cr, usedStyles(a), 'mkdir');
           if (v) return violate(v);
         }
       }
     } else if (cmd === 'touch') {
-      for (const p of paths) {
-        const full = this.resolve(p);
+      for (const a of pa) {
+        const full = this.resolve(a.value);
         if (!this.fs.exists(full)) {
-          const v = this.checkCreation(full, pathStyle(p), 'touch');
+          const v = this.checkCreation(full, usedStyles(a), 'touch');
           if (v) return violate(v);
         }
       }
     } else if (cmd === 'rm') {
       const rec = hasFlag(opts, 'r', 'R', 'recursive');
-      for (const p of paths) {
-        const full = this.resolve(p);
+      for (const a of pa) {
+        const full = this.resolve(a.value);
         const affected = [full, ...(rec && this.fs.isDir(full) ? this.fs.descendants(full) : [])];
-        for (const a of affected) {
-          const v = this.checkRemoval(a, pathStyle(p), 'rm');
+        for (const x of affected) {
+          const v = this.checkRemoval(x, usedStyles(a), 'rm');
           if (v) return violate(v);
         }
       }
     } else if (cmd === 'rmdir') {
-      for (const p of paths) {
-        const v = this.checkRemoval(this.resolve(p), pathStyle(p), 'rmdir');
+      for (const a of pa) {
+        const v = this.checkRemoval(this.resolve(a.value), usedStyles(a), 'rmdir');
         if (v) return violate(v);
       }
     } else if (cmd === 'cp' || cmd === 'mv') {
-      if (paths.length < 2) return ok;
-      const dest = paths[paths.length - 1];
-      const srcs = paths.slice(0, -1);
-      const destFull = this.resolve(dest);
+      if (pa.length < 2) return ok;
+      const dest = pa[pa.length - 1];
+      const srcs = pa.slice(0, -1);
+      const destFull = this.resolve(dest.value);
       if (destFull === ROOT) {
         return block(tr(`You cannot ${cmd} things onto the lab root itself.`,
           `Je kunt niets met ${cmd} op de lab-hoofdmap zelf zetten.`));
       }
       if (cmd === 'mv') {
-        for (const s of srcs) {
-          const sfull = this.resolve(s);
-          for (const a of [sfull, ...this.fs.descendants(sfull)]) {
-            const v = this.checkRemoval(a, pathStyle(s), 'mv');
+        for (const a of srcs) {
+          const sfull = this.resolve(a.value);
+          for (const x of [sfull, ...this.fs.descendants(sfull)]) {
+            const v = this.checkRemoval(x, usedStyles(a), 'mv');
             if (v) return violate(v);
           }
         }
       }
-      for (const s of srcs) {
-        const final = this.fs.isDir(destFull) || srcs.length > 1
-          ? join(destFull, basename(normpath(s))) : destFull;
+      const used = usedStyles(dest);
+      for (const a of srcs) {
+        const sfull = this.resolve(a.value);
+        // `cp -r . dest` puts the contents straight into dest, like the real cp
+        const final = isDotName(a.value) && this.fs.isDir(destFull) ? destFull
+          : this.fs.isDir(destFull) || srcs.length > 1 ? join(destFull, basename(normpath(a.value))) : destFull;
         const node = this.targets[this.rel(final)];
-        if (node && node.style && node.style !== pathStyle(dest)) {
-          return violate(this.styleMsg(final, node.style, pathStyle(dest)));
-        }
-        const sfull = this.resolve(s);
+        if (node?.style && !used.has(node.style)) return violate(this.styleMsg(final, node.style, used));
+        if (node?.glob && !a.globbed) return violate(this.globMsg(final));
         if (this.fs.isDir(sfull)) {
           for (const d of this.fs.descendants(sfull)) {
             const mapped = normpath(join(final, d.slice(sfull.length + 1)));
             const n = this.targets[this.rel(mapped)];
-            if (n && n.style && n.style !== pathStyle(dest)) return violate(this.styleMsg(mapped, n.style, pathStyle(dest)));
+            if (n?.style && !used.has(n.style)) return violate(this.styleMsg(mapped, n.style, used));
           }
         }
       }
@@ -216,33 +230,44 @@ export class Lab {
     return ok;
   }
 
-  private styleMsg(full: string, wanted: string, used: string): string {
-    return tr('%s must be handled with %s path (you used %s one).',
-      '%s moet behandeld worden met %s pad (jij gebruikte %s pad).')
-      .replace('%s', this.disp(full))
-      .replace('%s', wanted === 'abs' ? tr('an ABSOLUTE', 'een ABSOLUUT') : tr('a RELATIVE', 'een RELATIEF'))
-      .replace('%s', used === 'abs' ? tr('an absolute', 'een absoluut') : tr('a relative', 'een relatief'));
+  private styleMsg(full: string, wanted: string, used: Set<string>): string {
+    const want = {
+      abs: tr('an ABSOLUTE path', 'een ABSOLUUT pad'),
+      rel: tr('a RELATIVE path', 'een RELATIEF pad'),
+      home: tr('a path that starts with ~', 'een pad dat met ~ begint'),
+      dot: tr('. as destination (cd to the target directory first)', '. als bestemming (ga eerst met cd naar de doelmap)'),
+    }[wanted];
+    const got = used.has('dot') ? tr('.', '.')
+      : used.has('home') ? tr('a path with ~', 'een pad met ~')
+      : used.has('abs') ? tr('an absolute path', 'een absoluut pad') : tr('a relative path', 'een relatief pad');
+    return tr(`${this.disp(full)} must be handled with ${want} (you used ${got}).`,
+      `${this.disp(full)} moet behandeld worden met ${want} (jij gebruikte ${got}).`);
   }
 
-  private checkCreation(full: string, style: string, cmd: string): string | null {
+  private globMsg(full: string): string {
+    return tr(`${this.disp(full)} is part of a group: move or copy the group with a wildcard (* or ?) instead of naming the files one by one.`,
+      `${this.disp(full)} hoort bij een groep: verplaats of kopieer de groep met een wildcard (* of ?) in plaats van de bestanden één voor één te noemen.`);
+  }
+
+  private checkCreation(full: string, used: Set<string>, cmd: string): string | null {
     const node = this.targets[this.rel(full)];
     if (!node) return null;
     if (node.mode === 'restricted' || node.mode === 'inherit') {
       return tr(`${cmd} is not allowed for ${this.disp(full)}: that one has to be copied or moved from ~/${node.source}.`,
         `${cmd} is niet toegestaan voor ${this.disp(full)}: die moet je kopiëren of verplaatsen vanuit ~/${node.source}.`);
     }
-    if (node.style && node.style !== style) return this.styleMsg(full, node.style, style);
+    if (node.style && !used.has(node.style)) return this.styleMsg(full, node.style, used);
     return null;
   }
 
-  private checkRemoval(full: string, style: string, cmd: string): string | null {
+  private checkRemoval(full: string, used: Set<string>, cmd: string): string | null {
     const j = this.junk[this.rel(full)];
     if (!j) return null;
     if (j.rmdirOnly && cmd !== 'rmdir') {
       return tr(`${this.disp(full)} is an empty directory that must be removed with rmdir (not ${cmd}).`,
         `${this.disp(full)} is een lege map die je met rmdir moet verwijderen (niet met ${cmd}).`);
     }
-    if (j.style && j.style !== style) return this.styleMsg(full, j.style, style);
+    if (j.style && !used.has(j.style)) return this.styleMsg(full, j.style, used);
     return null;
   }
 
@@ -284,16 +309,20 @@ export class Lab {
       }
     }
 
-    const args: string[] = [];
-    for (let a of rawArgs) {
-      a = this.expandTilde(a);
-      if (a.startsWith('-') && a.length > 1) args.push(a);
-      else args.push(...expandGlob(this.fs, this.cwd, a));
+    const args: Arg[] = [];
+    for (const raw of rawArgs) {
+      const a = this.expandTilde(raw);
+      if (a.startsWith('-') && a.length > 1) args.push({ value: a, raw, globbed: false });
+      else {
+        const globbed = /[*?[]/.test(a);
+        for (const value of expandGlob(this.fs, this.cwd, a)) args.push({ value, raw, globbed });
+      }
     }
+    const values = args.map(a => a.value);
 
     this.state.commands++;
     if (cmd === 'pwd') { this.print(this.cwd); return; }
-    if (cmd === 'cd') { this.doCd(args); return; }
+    if (cmd === 'cd') { this.doCd(values); return; }
 
     const v = this.vet(cmd, args);
     if (!v.ok) {
@@ -309,7 +338,7 @@ export class Lab {
     }
 
     const ctx: Ctx = { fs: this.fs, cwd: this.cwd, width: this.width, print: s => this.print(s) };
-    COMMANDS[cmd](ctx, args);
+    COMMANDS[cmd](ctx, values);
   }
 
   private doCd(args: string[]): void {
@@ -370,9 +399,21 @@ export class Lab {
       `  ~ staat voor de labmap (${ROOT}); ~/... telt als een absoluut pad.`));
     this.print(tr('  Wildcards like *.txt work. Pipes, redirection and ; && are off.',
       '  Wildcards zoals *.txt werken. Pipes, omleidingen en ; && staan uit.'));
+    this.print(tr('  *  any number of characters      ?  exactly one character',
+      "  *  willekeurig aantal tekens     ?  precies één willekeurig teken"));
+    this.print(tr('  ~  your home directory           .  the current directory     ..  the parent directory',
+      '  ~  je homemap                    .  de huidige map            ..  de bovenliggende map'));
   }
 
   private annotation(n: Target): string {
+    if (n.mode === 'restricted' && n.glob) {
+      return yellow(tr(`★ no mkdir/touch → copy or move it with a WILDCARD from ~/${n.source}`,
+        `★ geen mkdir/touch → kopieer of verplaats het met een WILDCARD vanuit ~/${n.source}`));
+    }
+    if (n.mode === 'restricted' && n.style === 'dot') {
+      return yellow(tr(`★ no mkdir/touch → copy or move it from ~/${n.source}: cd to its directory first and use . as destination`,
+        `★ geen mkdir/touch → kopieer of verplaats het vanuit ~/${n.source}: ga eerst met cd naar de map en gebruik . als bestemming`));
+    }
     if (n.mode === 'restricted') {
       return yellow(tr(`★ no mkdir/touch → copy or move it from ~/${n.source}`,
         `★ geen mkdir/touch → kopieer of verplaats het vanuit ~/${n.source}`));
@@ -384,6 +425,7 @@ export class Lab {
     if (n.mode === 'exists') return dim(tr('(already there)', '(staat er al)'));
     if (n.style === 'abs') return cyan(tr('◆ create it with an ABSOLUTE path', '◆ maak het aan met een ABSOLUUT pad'));
     if (n.style === 'rel') return magenta(tr('◆ create it with a RELATIVE path', '◆ maak het aan met een RELATIEF pad'));
+    if (n.style === 'home') return cyan(tr('◆ create it with a path that starts with ~', '◆ maak het aan met een pad dat met ~ begint'));
     return '';
   }
 
@@ -417,6 +459,15 @@ export class Lab {
     const width = Math.max(...rows.map(r => r[0].length)) + 2;
     for (const [left, ann] of rows) this.print('  ' + left.padEnd(width) + ann);
 
+    const groups = this.spec.groups ?? [];
+    if (groups.length) {
+      this.print();
+      this.print(bold(tr('Wildcards', 'Wildcards')) +
+        tr(' (one pattern with * or ? per group - not the files one by one; look-alikes must stay behind):',
+          ' (één patroon met * of ? per groep - niet de bestanden één voor één; gelijkaardige bestanden blijven liggen):'));
+      for (const g of groups) this.print('  ' + groupText(g));
+    }
+
     this.print();
     this.print(bold(tr('Remove from ~/work', 'Verwijder uit ~/work')) +
       tr(' (everything that is not in the picture above must go):', ' (alles wat niet in bovenstaande afbeelding staat moet weg):'));
@@ -428,6 +479,7 @@ export class Lab {
       if (j.rmdirOnly) extra += '  ' + red(tr('rmdir only - no rm!', 'enkel rmdir - geen rm!'));
       if (j.style === 'abs') extra += '  ' + cyan(tr('◆ remove it with an ABSOLUTE path', '◆ verwijder het met een ABSOLUUT pad'));
       if (j.style === 'rel') extra += '  ' + magenta(tr('◆ remove it with a RELATIVE path', '◆ verwijder het met een RELATIEF pad'));
+      if (j.style === 'home') extra += '  ' + cyan(tr('◆ remove it with a path that starts with ~', '◆ verwijder het met een pad dat met ~ begint'));
       this.print('  ' + ('~/' + rel + (j.type === 'dir' ? '/' : '')).padEnd(30) + ' ' + what + extra);
     }
     if (Object.values(this.targets).some(n => n.mode === 'restricted' && n.source!.startsWith('work/'))) {
@@ -440,8 +492,16 @@ export class Lab {
       `  • Commando's: ${ALLOWED.join(' ')}   (typ \`help\` voor de lab-commando's)`));
     this.print('  • ' + yellow('★') + tr(' items may NOT be made with mkdir/touch - bring them over with cp or mv.',
       ' items mag je NIET met mkdir/touch maken - breng ze over met cp of mv.'));
-    this.print('  • ' + cyan('◆') + tr(' items must be created/removed with the stated kind of path (~/... is absolute).',
-      ' items moet je aanmaken/verwijderen met het opgegeven soort pad (~/... is absoluut).'));
+    this.print('  • ' + cyan('◆') + tr(' items must be created/removed with the stated kind of path (~/... is absolute, and also a path "with ~").',
+      ' items moet je aanmaken/verwijderen met het opgegeven soort pad (~/... is absoluut, en ook een pad "met ~").'));
+    if (groups.length) {
+      this.print('  • ' + tr('Files marked WILDCARD may only be copied/moved through a pattern with * or ? (e.g. mv ~/stock/ab* ~/work/x).',
+        'Bestanden met WILDCARD mag je enkel kopiëren/verplaatsen met een patroon met * of ? (bv. mv ~/stock/ab* ~/work/x).'));
+    }
+    if (Object.values(this.targets).some(n => n.style === 'dot')) {
+      this.print('  • ' + tr('"use . as destination" means: cd into the target directory, then e.g. mv ~/stock/file . (. is the current directory).',
+        '"gebruik . als bestemming" betekent: ga met cd naar de doelmap en doe dan bv. mv ~/stock/bestand . (. is de huidige map).'));
+    }
     this.print('  • ' + tr('Directories marked ', 'Mappen met ') + red(tr('rmdir only', 'enkel rmdir')) +
       tr(' may not be removed with rm.', ' mag je niet met rm verwijderen.'));
     this.print(tr('  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.',
@@ -543,12 +603,15 @@ export class Lab {
       const kind = kindWord(n.type);
       if (n.mode === 'restricted' || n.mode === 'inherit') {
         this.print(tr(`Missing: ~/${rel} (${kind}). It exists as ~/${n.source} - use cp or mv to bring it over.`,
-          `Ontbreekt: ~/${rel} (${kind}). Het bestaat als ~/${n.source} - gebruik cp of mv om het over te brengen.`));
+          `Ontbreekt: ~/${rel} (${kind}). Het bestaat als ~/${n.source} - gebruik cp of mv om het over te brengen.`) +
+          (n.glob ? tr(' Do the whole group in one go with a wildcard.', ' Doe de hele groep in één keer met een wildcard.')
+            : n.style === 'dot' ? tr(' cd to its directory first and use . as destination.', ' Ga eerst met cd naar de map en gebruik . als bestemming.') : ''));
       } else {
         const how = n.type === 'dir' ? 'mkdir' : 'touch';
         const style = n.style === 'abs' ? tr(' using an absolute path (starts with / or ~/)', ' met een absoluut pad (begint met / of ~/)')
           : n.style === 'rel' ? tr(' using a relative path (seen from your current directory - `pwd`)',
-            ' met een relatief pad (gezien vanuit je huidige map - `pwd`)') : '';
+            ' met een relatief pad (gezien vanuit je huidige map - `pwd`)')
+          : n.style === 'home' ? tr(' using a path that starts with ~', ' met een pad dat met ~ begint') : '';
         this.print(tr(`Missing: ~/${rel} (${kind}). Create it with ${how}${style}.`,
           `Ontbreekt: ~/${rel} (${kind}). Maak het aan met ${how}${style}.`));
       }
@@ -599,4 +662,17 @@ export class Lab {
     }
     return out;
   }
+}
+
+/** Describe, in words, which files of a wildcard group have to be moved where. */
+function groupText(g: Group): string {
+  const where = `~/${g.parent}`;
+  const to = `~/${g.dir}`;
+  const what = g.kind === 'prefix'
+    ? tr(`all files in ${where} that start with «${g.parts[0]}»`, `alle bestanden in ${where} die beginnen met «${g.parts[0]}»`)
+    : g.kind === 'suffix'
+      ? tr(`all files in ${where} that end with «${g.parts[0]}»`, `alle bestanden in ${where} die eindigen op «${g.parts[0]}»`)
+      : tr(`files in ${where} named «${g.parts[0]}», then exactly ONE arbitrary character, then «${g.parts[1]}»`,
+        `bestanden in ${where} met de naam «${g.parts[0]}», dan precies ÉÉN willekeurig teken, dan «${g.parts[1]}»`);
+  return `${what}  →  ${to}`;
 }

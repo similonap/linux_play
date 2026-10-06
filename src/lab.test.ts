@@ -13,22 +13,31 @@ function newSession(seed: number, level: number, lang: 'nl' | 'en' = 'en') {
 
 /** Solve an exercise the way a student would, using only lab commands. */
 function solve(s: Session): void {
-  const { targets, junk } = s.lab.spec;
+  const { targets, junk, groups = [] } = s.lab.spec;
   const run = (c: string) => s.run(c);
+  const path = (style: string | null, rel: string) =>
+    style === 'rel' ? rel : style === 'home' ? `~/${rel}` : `${ROOT}/${rel}`;
   // 1. everything the student has to create
   for (const [rel, n] of Object.entries(targets)) {
     if (n.mode !== 'create') continue;
-    const p = n.style === 'rel' ? rel : `${ROOT}/${rel}`;
-    run(`${n.type === 'dir' ? 'mkdir' : 'touch'} ${p}`);
+    run(`${n.type === 'dir' ? 'mkdir' : 'touch'} ${path(n.style, rel)}`);
   }
-  // 2. then move the restricted items; deepest sources first, because a source can
+  // 2. wildcard groups: one pattern each
+  for (const g of groups) run(`mv ${ROOT}/${g.parent}/${g.pattern} ${ROOT}/${g.dir}`);
+  // 3. the other restricted items; deepest sources first, because a source can
   //    live inside another directory that is moved as well
-  const restricted = Object.entries(targets).filter(([, n]) => n.mode === 'restricted')
+  const restricted = Object.entries(targets).filter(([, n]) => n.mode === 'restricted' && !n.glob)
     .sort((x, y) => y[1].source!.split('/').length - x[1].source!.split('/').length);
-  for (const [rel, n] of restricted) run(`mv ${ROOT}/${n.source} ${ROOT}/${rel}`);
+  for (const [rel, n] of restricted) {
+    if (n.style === 'dot') {
+      run(`cd ${ROOT}/${rel.slice(0, rel.lastIndexOf('/'))}`);
+      run(`mv ${ROOT}/${n.source} .`);
+      run('cd ~');
+    } else run(`mv ${ROOT}/${n.source} ${ROOT}/${rel}`);
+  }
   for (const [rel, j] of Object.entries(junk)) {
     if (j.child) continue;
-    const p = j.style === 'rel' ? rel : `${ROOT}/${rel}`;
+    const p = path(j.style, rel);
     run(j.rmdirOnly ? `rmdir ${p}` : j.type === 'dir' ? `rm -r ${p}` : `rm ${p}`);
   }
 }
@@ -46,6 +55,96 @@ describe('generator', () => {
       expect(Object.keys(s.targets).length).toBeGreaterThan(3);
       expect(Object.values(s.junk).some(j => j.rmdirOnly)).toBe(true);
     }
+  });
+});
+
+describe('wildcards, ~ and .', () => {
+  const find = (level: number, pred: (s: Session) => boolean) => {
+    for (let seed = 1; seed < 300; seed++) { const s = newSession(seed, level); if (pred(s)) return s; }
+    throw new Error('no such exercise');
+  };
+
+  it('levels 2 and 3 always have a wildcard group; level 3 usually uses ~ and . too', () => {
+    let dot = 0, home = 0;
+    for (let seed = 1; seed <= 100; seed++) {
+      expect(newSession(seed, 2).lab.spec.groups!.length).toBe(1);
+      const l3 = newSession(seed, 3).lab.spec;
+      expect(l3.groups!.length).toBeGreaterThanOrEqual(1);
+      if (Object.values(l3.targets).some(n => n.style === 'dot')) dot++;
+      if (Object.values(l3.targets).some(n => n.style === 'home')) home++;
+    }
+    expect(dot).toBeGreaterThan(70);
+    expect(home).toBeGreaterThan(95);
+  });
+
+  it('group files cannot be moved one by one, but can with the pattern', () => {
+    const s = newSession(5, 2);
+    const g = s.lab.spec.groups![0];
+    s.lab.fs.mkdirp(`${ROOT}/${g.dir}`);
+    const out = strip(s.run(`mv ${ROOT}/${g.parent}/${g.files[0]} ${ROOT}/${g.dir}`));
+    expect(out).toContain('wildcard');
+    expect(s.info().violations).toBe(1);
+    const st = s.info().violations;
+    s.run(`mv ${ROOT}/${g.parent}/${g.pattern} ${ROOT}/${g.dir}`);
+    expect(s.info().violations).toBe(st);
+    for (const f of g.files) expect(s.lab.fs.exists(`${ROOT}/${g.dir}/${f}`)).toBe(true);
+    for (const d of g.decoys) expect(s.lab.fs.exists(`${ROOT}/${g.parent}/${d}`)).toBe(true);
+  });
+
+  it('a pattern that is too greedy drags the look-alikes along and fails the check', () => {
+    const s = newSession(5, 2);
+    const g = s.lab.spec.groups![0];
+    s.lab.fs.mkdirp(`${ROOT}/${g.dir}`);
+    s.run(`mv ${ROOT}/${g.parent}/* ${ROOT}/${g.dir}`);
+    expect(strip(s.run('check'))).toContain('should not be there');
+  });
+
+  it('? matches exactly one character', () => {
+    const s = newSession(1, 1);
+    s.run('cd work');
+    s.run('touch a1 a2 a10');
+    expect(strip(s.run('ls a?'))).toMatch(/a1\s+a2/);
+    expect(strip(s.run('ls a?'))).not.toContain('a10');
+  });
+
+  it('~ items refuse a plain absolute path', () => {
+    const s = find(3, x => Object.values(x.lab.spec.targets).some(n => n.style === 'home' && n.mode === 'create'));
+    const [rel, n] = Object.entries(s.lab.spec.targets).find(([, t]) => t.style === 'home' && t.mode === 'create')!;
+    const cmd = n.type === 'dir' ? 'mkdir -p' : 'touch';
+    if (n.type === 'file') s.lab.fs.mkdirp(`${ROOT}/${rel.slice(0, rel.lastIndexOf('/'))}`);
+    expect(strip(s.run(`${cmd} ${ROOT}/${rel}`))).toContain('~');
+    expect(s.info().violations).toBe(1);
+    s.run(`${cmd} ~/${rel}`);
+    expect(s.info().violations).toBe(1);
+    expect(s.lab.fs.exists(`${ROOT}/${rel}`)).toBe(true);
+  });
+
+  it('. items need cd + `.` as destination', () => {
+    const s = find(3, x => Object.values(x.lab.spec.targets).some(n => n.style === 'dot'));
+    const [rel, n] = Object.entries(s.lab.spec.targets).find(([, t]) => t.style === 'dot')!;
+    const parent = rel.slice(0, rel.lastIndexOf('/'));
+    s.lab.fs.mkdirp(`${ROOT}/${parent}`);
+    const flag = n.type === 'dir' ? '-r ' : '';
+    expect(strip(s.run(`cp ${flag}${ROOT}/${n.source} ${ROOT}/${rel}`))).toContain('.');
+    expect(s.info().violations).toBe(1);
+    s.run(`cd ${ROOT}/${parent}`);
+    s.run(`cp ${flag}${ROOT}/${n.source} .`);
+    expect(s.info().violations).toBe(1);
+    expect(s.lab.fs.exists(`${ROOT}/${rel}`)).toBe(true);
+  });
+
+  it('cp -r . copies the contents, and path/./sub equals path/sub', () => {
+    const s = newSession(1, 1);
+    s.run('cd work');
+    s.run('mkdir -p a/b');
+    s.run('touch a/b/f');
+    s.run('mkdir dst');
+    s.run('cd a');
+    s.run('cp -r . ../dst');
+    expect(s.lab.fs.exists(`${ROOT}/work/dst/b/f`)).toBe(true);
+    expect(s.lab.fs.exists(`${ROOT}/work/dst/a`)).toBe(false);
+    expect(strip(s.run('ls ./b/./'))).toContain('f');
+    expect(strip(s.run('mv . ../dst'))).toContain('busy');
   });
 });
 

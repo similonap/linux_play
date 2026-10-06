@@ -141,6 +141,9 @@ function rmdir(c: Ctx, args: string[]): number {
   return rc;
 }
 
+/** Is this argument the directory `.` / `..` itself (or ends in /. or /..)? */
+export const isDotName = (arg: string) => /(^|\/)\.\.?$/.test(arg);
+
 interface Pair { s: string; sfull: string; final: string }
 
 function plan(cmd: string, ops: string[], cwd: string, fs: VFS): { pairs?: Pair[]; msg?: string } {
@@ -153,7 +156,9 @@ function plan(cmd: string, ops: string[], cwd: string, fs: VFS): { pairs?: Pair[
   if (srcs.length > 1 && !fs.isDir(dfull)) return { msg: `${cmd}: target '${dest}' is not a directory` };
   const pairs = srcs.map(s => {
     const sfull = resolve(cwd, s);
-    return { s, sfull, final: fs.isDir(dfull) ? join(dfull, basename(sfull)) : dfull };
+    // `cp -r . dest` copies the *contents* of the directory into dest (the source is named `.`)
+    const contents = isDotName(s) && fs.isDir(dfull);
+    return { s, sfull, final: contents ? dfull : fs.isDir(dfull) ? join(dfull, basename(sfull)) : dfull };
   });
   return { pairs };
 }
@@ -198,6 +203,7 @@ function mv(c: Ctx, args: string[]): number {
   let rc = 0;
   for (const { s, sfull, final } of pairs!) {
     if (!c.fs.exists(sfull)) { rc = fail(c, `mv: cannot stat '${s}': No such file or directory`); continue; }
+    if (isDotName(s)) { rc = fail(c, `mv: cannot move '${s}' to '${relpath(final, c.cwd)}': Device or resource busy`); continue; }
     if (sfull === final) { rc = fail(c, `mv: '${s}' and '${s}' are the same file`); continue; }
     if (c.fs.isDir(sfull) && inside(final, sfull)) {
       rc = fail(c, `mv: cannot move '${s}' to a subdirectory of itself, '${relpath(final, c.cwd)}'`); continue;

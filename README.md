@@ -33,9 +33,13 @@ staat moet weg.
 | ◆ items moeten met een absoluut of relatief pad gemaakt/verwijderd worden | het argument wordt bekeken; `~/...` telt als absoluut |
 | "enkel rmdir"-mappen mogen niet met `rm` verwijderd worden (of weggeschoven) | geweigerd, ook via een recursieve `rm` van de bovenliggende map |
 | enkel de opgesomde commando's, geen pipes/omleidingen/ketens | geweigerd (wildcards werken wel) |
+| WILDCARD-groep: bestanden in `~/stock` die met één patroon (`*` of `?`) verplaatst moeten worden | `cp`/`mv` met de bestandsnaam zelf wordt geweigerd; gelijkaardige bestanden (bv. `les10.txt` naast `les?.txt`) blijven liggen, een te gulzig patroon geeft dus extra bestanden in `check` |
+| ◆ pad "dat met `~` begint" | enkel `~/...` volstaat, `/home/student/...` niet |
+| ★ "gebruik `.` als bestemming" | je moet eerst met `cd` naar de doelmap en dan `cp`/`mv` met `.` als bestemming gebruiken |
 | blijf binnen de labmap | elk pad buiten `/home/student` wordt geweigerd; `cd` kan er niet uit |
 
 Een geweigerd commando wordt nooit uitgevoerd; overtredingen worden geteld en getoond door `check`.
+`cp -r . ~/x` kopieert de *inhoud* van de huidige map (zoals het echte `cp`), en `map/./sub` is hetzelfde als `map/sub`.
 `hint` wijst één openstaand item aan zonder het commando te geven.
 
 ## Ontwikkelen

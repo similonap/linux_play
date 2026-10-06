@@ -2,14 +2,30 @@ import { Rng, hash32, hex8 } from './rng';
 import { dirname, basename } from './vfs';
 
 export type Mode = 'create' | 'restricted' | 'inherit' | 'exists';
-export type Style = 'abs' | 'rel' | null;
+/** abs: path starts with / or ~ | rel: any other path | home: path starts with ~ | dot: destination is `.` */
+export type Style = 'abs' | 'rel' | 'home' | 'dot' | null;
 export type Kind = 'file' | 'dir';
 
-export interface Target { type: Kind; mode: Mode; source: string | null; style: Style; token: string | null }
+export interface Target {
+  type: Kind; mode: Mode; source: string | null; style: Style; token: string | null;
+  /** part of a wildcard group: must be copied/moved through a * or ? pattern */
+  glob?: boolean;
+}
+/** A set of files in ~/stock that has to be moved into `dir` with one wildcard pattern. */
+export interface Group {
+  kind: 'prefix' | 'suffix' | 'single';
+  dir: string;       // target directory, e.g. work/images
+  parent: string;    // where the files live, e.g. stock/downloads
+  files: string[];
+  decoys: string[];  // look-alikes next to them that must NOT be moved
+  pattern: string;   // a pattern that selects exactly `files` (used by the tests)
+  parts: string[];   // pieces of the description shown to the student
+}
 export interface Junk { type: Kind; rmdirOnly: boolean; style: Style; nonempty: boolean; child?: boolean }
 export interface Spec {
   targets: Record<string, Target>;
   junk: Record<string, Junk>;
+  groups?: Group[];
   seed: number;
   level: number;
   created: string;
@@ -32,15 +48,19 @@ type Range = [number, number];
 interface Cfg {
   top: Range; rootFiles: Range; files: Range; subdirs: Range; subdirsDeep: Range;
   depth: number; restricted: number; exists: number; junkDirs: Range; junkFiles: Range; junkFull: number;
+  home: Range; dot: Range; groups: Range;
 }
 
 export const LEVELS: Record<number, Cfg> = {
   1: { top: [2, 3], rootFiles: [0, 1], files: [1, 2], subdirs: [0, 1], subdirsDeep: [0, 0],
-       depth: 2, restricted: 0.25, exists: 0.25, junkDirs: [1, 1], junkFiles: [1, 1], junkFull: 0 },
+       depth: 2, restricted: 0.25, exists: 0.25, junkDirs: [1, 1], junkFiles: [1, 1], junkFull: 0,
+       home: [0, 1], dot: [0, 0], groups: [0, 1] },
   2: { top: [3, 4], rootFiles: [1, 1], files: [1, 3], subdirs: [0, 2], subdirsDeep: [0, 0],
-       depth: 2, restricted: 0.30, exists: 0.25, junkDirs: [1, 2], junkFiles: [1, 2], junkFull: 1 },
+       depth: 2, restricted: 0.30, exists: 0.25, junkDirs: [1, 2], junkFiles: [1, 2], junkFull: 1,
+       home: [1, 1], dot: [0, 1], groups: [1, 1] },
   3: { top: [3, 4], rootFiles: [1, 2], files: [1, 3], subdirs: [1, 2], subdirsDeep: [0, 1],
-       depth: 3, restricted: 0.35, exists: 0.30, junkDirs: [2, 2], junkFiles: [2, 3], junkFull: 1 },
+       depth: 3, restricted: 0.35, exists: 0.30, junkDirs: [2, 2], junkFiles: [2, 3], junkFull: 1,
+       home: [1, 2], dot: [1, 1], groups: [1, 2] },
 };
 
 export function generate(seed: number, level: number): Spec {
@@ -65,7 +85,7 @@ function splitext(name: string): [string, string] {
   return i <= 0 ? [name, ''] : [name.slice(0, i), name.slice(i)];
 }
 
-function tryGenerate(rng: Rng, cfg: Cfg): { targets: Record<string, Target>; junk: Record<string, Junk> } | null {
+function tryGenerate(rng: Rng, cfg: Cfg): { targets: Record<string, Target>; junk: Record<string, Junk>; groups: Group[] } | null {
   const nodes: [string, Kind][] = []; // DFS order, parents before children
 
   for (const f of rng.sample(FILE_WORDS, rng.int(...cfg.rootFiles))) nodes.push(['work/' + f, 'file']);
@@ -113,6 +133,7 @@ function tryGenerate(rng: Rng, cfg: Cfg): { targets: Record<string, Target>; jun
   rng.shuffle(pool);
   for (let i = rng.int(1, 2); i > 0; i--) if (pool.length) styles.set(pool.pop()!, 'abs');
   for (let i = rng.int(1, 2); i > 0; i--) if (pool.length) styles.set(pool.pop()!, 'rel');
+  for (let i = rng.int(...cfg.home); i > 0; i--) if (pool.length) styles.set(pool.pop()!, 'home');
 
   // ---- sources for restricted items (in ~/stock or misplaced inside ~/work)
   const occupied = new Set(nodes.map(([r]) => r));
@@ -142,6 +163,41 @@ function tryGenerate(rng: Rng, cfg: Cfg): { targets: Record<string, Target>; jun
     if (src === null) return null;
     sources.set(rel, src);
     occupied.add(src);
+  }
+
+  // ---- some restricted items must be brought over with `.` as destination (cd there first)
+  const dotCands = nodes.filter(([r]) => modes.get(r) === 'restricted' && basename(r) === basename(sources.get(r)!)).map(([r]) => r);
+  for (const r of rng.sample(dotCands, rng.int(...cfg.dot))) styles.set(r, 'dot');
+
+  // ---- wildcard groups: several files in ~/stock that must be moved with one * or ? pattern
+  const groups: Group[] = [];
+  const globFiles = new Set<string>();
+  const nGroups = rng.int(...cfg.groups);
+  for (const kind of rng.sample<Group['kind']>(['prefix', 'suffix', 'single'], nGroups)) {
+    const dirs = nodes.filter(([r, t]) => t === 'dir' && (modes.get(r) === 'create' || modes.get(r) === 'exists')
+      && !groups.some(g => g.dir === r)).map(([r]) => r);
+    if (!dirs.length) return null;
+    const dir = rng.choice(dirs);
+    const srcs = [...sources.values()];
+    const parents = ['stock', ...STOCK_SUBDIRS.map(x => 'stock/' + x)]
+      .filter(p => !srcs.some(s => p === s || p.startsWith(s + '/')));
+    const parent = rng.choice(parents);
+    const g = makeGroup(rng, kind);
+    const dest = g.files.map(f => dir + '/' + f);
+    const here = [...g.files, ...g.decoys].map(f => parent + '/' + f);
+    if (dest.some(d => occupied.has(d)) || here.some(h => occupied.has(h) || srcs.includes(h))) return null;
+    // the pattern must not catch anything else that lives next to the group
+    const re = patternRegex(g.pattern);
+    if ([...occupied, ...srcs].some(o => dirname(o) === parent && re.test(basename(o)))) return null;
+    g.files.forEach((f, i) => {
+      nodes.push([dest[i], 'file']);
+      modes.set(dest[i], 'restricted');
+      sources.set(dest[i], parent + '/' + f);
+      occupied.add(dest[i]);
+      globFiles.add(dest[i]);
+    });
+    here.forEach(h => occupied.add(h));
+    groups.push({ ...g, dir, parent });
   }
 
   // ---- junk that has to be removed
@@ -179,14 +235,43 @@ function tryGenerate(rng: Rng, cfg: Cfg): { targets: Record<string, Target>; jun
   if (!junkVals.length || !junkVals.some(j => j.rmdirOnly)) return null;
   if (rng.next() < 0.5) {
     const cands = Object.keys(junk).filter(r => !junk[r].child);
-    junk[rng.choice(cands)].style = rng.choice<Style>(['abs', 'rel']);
+    junk[rng.choice(cands)].style = rng.choice<Style>(['abs', 'rel', 'home']);
   }
 
   const targets: Record<string, Target> = {};
   for (const [rel, typ] of nodes) {
     const mode = modes.get(rel)!;
     const token = (mode === 'restricted' || mode === 'inherit') && typ === 'file' ? hex8(rng.bits32()) : null;
-    targets[rel] = { type: typ, mode, source: sources.get(rel) ?? null, style: styles.get(rel) ?? null, token };
+    targets[rel] = { type: typ, mode, source: sources.get(rel) ?? null, style: styles.get(rel) ?? null, token,
+      ...(globFiles.has(rel) ? { glob: true } : {}) };
   }
-  return { targets, junk };
+  return { targets, junk, groups };
+}
+
+function patternRegex(pattern: string): RegExp {
+  return new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+}
+
+const PREFIXES = ['foto', 'verslag', 'notitie', 'taak', 'rapport'];
+
+function makeGroup(rng: Rng, kind: Group['kind']): Omit<Group, 'dir' | 'parent'> {
+  if (kind === 'prefix') {
+    const p = rng.choice(PREFIXES);
+    const ext = rng.choice(['.jpg', '.txt', '.md', '.pdf']);
+    const sfx = rng.sample(['a', 'b', 'c', 'd', 'jan', 'feb', 'mrt'], 3);
+    const others = rng.sample(PREFIXES.filter(x => x !== p), 2);
+    return { kind, files: sfx.map(x => `${p}_${x}${ext}`), decoys: others.map((q, i) => `${q}_${sfx[i]}${ext}`),
+      pattern: `${p}*`, parts: [p] };
+  }
+  if (kind === 'suffix') {
+    const ext = rng.choice(['.csv', '.log', '.png', '.sql']);
+    const stems = rng.sample(['data', 'export', 'backup', 'stats', 'totaal'], 3);
+    const other = rng.choice(['.txt', '.bak', '.old']);
+    return { kind, files: stems.map(x => x + ext), decoys: [stems[0] + other, stems[1] + other],
+      pattern: `*${ext}`, parts: [ext] };
+  }
+  const base = rng.choice(['les', 'dag', 'week', 'hoofdstuk']);
+  const digits = rng.sample(['1', '2', '3', '4', '5'], 3);
+  return { kind, files: digits.map(d => `${base}${d}.txt`), decoys: [`${base}10.txt`, `${base}.txt`],
+    pattern: `${base}?.txt`, parts: [base, '.txt'] };
 }
