@@ -100,6 +100,26 @@ Note: students run real commands on the server. fslab only allows the listed
 commands, blocks pipes/redirection and keeps every path inside the student's
 own lab, but still treat it as untrusted and keep it in the container.
 
+## GitHub Pages (static, no server)
+
+`site/` is a fully client-side version: Pyodide (Python in WebAssembly) runs the
+unchanged `fslab.py`, and `site/webcmds.py` re-implements `ls cp mv rm rmdir
+mkdir touch tree` on Pyodide's in-memory file system (there are no real
+binaries in the browser). The lab is stored in IndexedDB, so a reload resumes.
+`?seed=4242` and `?level=3` work as in the server version.
+
+Differences: no teacher dashboard / command log (nothing is sent anywhere), and
+no proof codes (a signing key in a static site would be public).
+
+Deployment is `.github/workflows/pages.yml` (runs on every push to `main`).
+One-time setup: repo **Settings → Pages → Source: GitHub Actions**.
+
+Local preview:
+
+```bash
+./build_site.sh && python3 -m http.server -d _site 8000   # http://localhost:8000
+```
+
 ## In the browser without a server (WebVM)
 
 `labo/webvm-labo` boots a real Debian in the browser with WebVM/CheerpX.

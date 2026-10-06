@@ -40,6 +40,7 @@ VERSION = "1.0"
 ALLOWED = ["ls", "pwd", "cd", "cp", "mv", "touch", "mkdir", "rm", "rmdir", "tree"]
 META = ["task", "check", "hint", "proof", "help", "reset", "new", "clear", "exit", "quit"]
 SHELL_CHARS = set("|;&<>`$")
+MARKER = ".labid"  # hidden id file inside directories that must be copied/moved
 
 DIR_WORDS = ["src", "docs", "tests", "config", "assets", "build", "lib", "bin",
              "data", "scripts", "images", "logs", "backup", "reports", "notes",
@@ -177,6 +178,12 @@ def generate(seed, level):
         spec = _try_generate(rng, cfg)
         if spec:
             spec.update(seed=seed, level=level, version=VERSION, created=now())
+            # directories to be copied/moved carry a hidden marker file, so a
+            # directory made with mkdir (and then renamed) is recognised.
+            # Derived from the seed, not from rng, to keep old seeds identical.
+            for rel, n in spec["targets"].items():
+                if n["type"] == "dir" and n["mode"] == "restricted":
+                    n["token"] = hashlib.sha1(("%s:%s" % (seed, rel)).encode()).hexdigest()[:8]
             return spec
     raise RuntimeError("could not generate an exercise")
 
@@ -327,6 +334,9 @@ class Lab:
         self.prev = root
         self.tree_warned = False
         self._matches = []
+        # Optional replacement for running the real programs (used in the
+        # browser, where there is no subprocess): runner(cmd, args, cwd) -> rc
+        self.runner = None
 
     # ---- persistence -----------------------------------------------------
     @property
@@ -373,10 +383,13 @@ class Lab:
                 shutil.rmtree(p)
 
     def materialize(self):
-        def make(rel, typ, content):
+        def make(rel, typ, content, token=None):
             full = os.path.join(self.root, rel)
             if typ == "dir":
                 os.makedirs(full, exist_ok=True)
+                if token:
+                    with open(os.path.join(full, MARKER), "w") as f:
+                        f.write("LAB-ID %s\n" % token)
             else:
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 with open(full, "w") as f:
@@ -387,7 +400,8 @@ class Lab:
                 make(rel, n["type"], "This file was already here.\n")
             elif n["mode"] in ("restricted", "inherit"):
                 make(n["source"], n["type"],
-                     "LAB-ID %s\nThis file must be copied or moved, not recreated.\n" % n["token"])
+                     "LAB-ID %s\nThis file must be copied or moved, not recreated.\n" % n["token"],
+                     n["token"])
         for rel, j in self.junk.items():
             make(rel, j["type"], "junk\n")
 
@@ -518,6 +532,13 @@ class Lab:
                 node = self.targets.get(self.rel(final))
                 if node and node["style"] and node["style"] != path_style(dest):
                     return False, self.style_msg(final, node["style"], path_style(dest)), True
+                sfull = self.resolve(s)
+                if os.path.isdir(sfull):
+                    for d in self.descendants(sfull):
+                        mapped = os.path.normpath(os.path.join(final, os.path.relpath(d, sfull)))
+                        node = self.targets.get(self.rel(mapped))
+                        if node and node["style"] and node["style"] != path_style(dest):
+                            return False, self.style_msg(mapped, node["style"], path_style(dest)), True
 
         return True, None, False
 
@@ -603,13 +624,15 @@ class Lab:
             self.save_state()
             return
 
-        if cmd == "tree" and shutil.which("tree") is None:
-            if not self.tree_warned:
+        if cmd == "tree" and (self.runner or shutil.which("tree") is None):
+            if not self.runner and not self.tree_warned:
                 print(dim("(the real `tree` is not installed on this machine - using a built-in look-alike; "
                           "install it with `sudo apt install tree` or `brew install tree`)"))
                 self.tree_warned = True
             self.builtin_tree(args)
             rc = 0
+        elif self.runner:
+            rc = self.runner(cmd, args, self.cwd)
         else:
             env = dict(os.environ, HOME=self.root)
             try:
@@ -704,17 +727,20 @@ class Lab:
             self.show_proof()
         elif cmd in ("reset", "new"):
             what = "restart this exercise from scratch" if cmd == "reset" else "start a NEW random exercise"
-            try:
-                ans = input("This will %s and wipe ~/work and ~/stock. Continue? [y/N] " % what)
-            except EOFError:
-                ans = ""
-            if ans.strip().lower() not in ("y", "yes"):
+            if not self.confirm("This will %s and wipe ~/work and ~/stock. Continue?" % what):
                 print("cancelled")
                 return
             level = self.spec["level"]
             seed = self.spec["seed"] if cmd == "reset" else random.randrange(1, 100000)
             self.start_new(seed, level)
             self.show_task()
+
+    def confirm(self, question):
+        try:
+            ans = input(question + " [y/N] ")
+        except EOFError:
+            ans = ""
+        return ans.strip().lower() in ("y", "yes")
 
     def show_help(self):
         print(bold("Available commands"))
@@ -808,7 +834,8 @@ class Lab:
             for d in dns:
                 actual[self.rel(os.path.join(dp, d))] = "dir"
             for f in fns:
-                actual[self.rel(os.path.join(dp, f))] = "file"
+                if f != MARKER:
+                    actual[self.rel(os.path.join(dp, f))] = "file"
 
         missing, wrong_type, bad_content = [], [], []
         for rel, n in self.targets.items():
@@ -818,7 +845,10 @@ class Lab:
                 wrong_type.append(rel)
             elif n["token"]:
                 try:
-                    with open(os.path.join(self.root, rel), errors="replace") as f:
+                    path = os.path.join(self.root, rel)
+                    if n["type"] == "dir":
+                        path = os.path.join(path, MARKER)
+                    with open(path, errors="replace") as f:
                         if n["token"] not in f.read():
                             bad_content.append(rel)
                 except OSError:
@@ -849,8 +879,8 @@ class Lab:
             if bad_content:
                 print(red("✘ not the original (%d):" % len(bad_content)))
                 for r in bad_content:
-                    print("    ~/%s is not the file from ~/%s (recreated instead of copied/moved?)"
-                          % (r, self.targets[r]["source"]))
+                    print("    ~/%s is not the original %s from ~/%s (recreated instead of copied/moved?)"
+                          % (r, self.targets[r]["type"], self.targets[r]["source"]))
             if extra:
                 print(red("✘ should not be there (%d):" % len(extra)))
                 for r in extra:
@@ -890,7 +920,8 @@ class Lab:
         actual = set()
         for dp, dns, fns in os.walk(work):
             for n in dns + fns:
-                actual.add(self.rel(os.path.join(dp, n)))
+                if n != MARKER:
+                    actual.add(self.rel(os.path.join(dp, n)))
         for rel, n in self.targets.items():
             if rel not in actual:
                 kind = "directory" if n["type"] == "dir" else "file"

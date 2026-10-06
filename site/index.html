@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linux Lab</title>
+<link rel="stylesheet" href="vendor/xterm.min.css">
+<script src="vendor/xterm.min.js"></script>
+<script src="vendor/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262a33; --text: #d7dae0; --muted: #8b919c;
+    --accent: #5aa9ff; --ok: #3fbf7f; --warn: #f0b84c; --bad: #ef6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; letter-spacing: .02em; }
+  .chip { padding: 3px 9px; border-radius: 999px; background: #1f232c; border: 1px solid var(--line);
+    color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.ok { border-color: var(--ok); color: var(--ok); }
+  .chip.bad { border-color: var(--bad); color: var(--bad); }
+  .spacer { flex: 1; }
+  button { background: #22272f; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 11px; cursor: pointer; font: inherit; font-size: 13px; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); color: #06182e; border-color: var(--accent); font-weight: 600; }
+  #term { flex: 1; min-height: 0; padding: 6px 0 0 8px; }
+  .xterm { height: 100%; }
+  footer { padding: 4px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line);
+    background: var(--panel); display: flex; gap: 14px; flex-wrap: wrap; }
+  @media (max-width: 640px) { header h1 { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Linux Lab</h1>
+  <span class="chip" id="ex">exercise <b>—</b></span>
+  <span class="chip" id="cmds">commands <b>0</b></span>
+  <span class="chip" id="viol">violations <b>0</b></span>
+  <span class="chip" id="status">not solved</span>
+  <span class="spacer"></span>
+  <button class="act" disabled data-cmd="task">Task</button>
+  <button class="act" disabled data-cmd="hint">Hint</button>
+  <button class="act" disabled data-cmd="tree ~">Tree</button>
+  <button class="act primary" disabled data-cmd="check">Check</button>
+  <button class="act" disabled data-cmd="new" title="a different random exercise">New</button>
+</header>
+<div id="term"></div>
+<footer>
+  <span>Commands: ls pwd cd cp mv touch mkdir rm rmdir tree</span>
+  <span>Lab: task · check · hint · help · reset · new</span>
+  <span id="conn">loading…</span>
+</footer>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const term = new Terminal({
+    cursorBlink: true, fontSize: 14, scrollback: 5000, convertEol: false,
+    fontFamily: 'Menlo, "DejaVu Sans Mono", Consolas, monospace',
+    theme: { background: '#0f1115', foreground: '#d7dae0', cursor: '#5aa9ff', selectionBackground: '#2b4a73' }
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('term'));
+  fit.fit();
+  const $ = id => document.getElementById(id);
+
+  let py = null, session = null;
+  let buf = '', cur = 0, prompt = '', history = [], hIdx = 0, draft = '';
+  let busy = true, chain = Promise.resolve();
+
+  try { history = JSON.parse(localStorage.getItem('fslab.history') || '[]'); } catch (e) {}
+  hIdx = history.length;
+
+  // ---- prompt + line editor ------------------------------------------------
+  function paintPrompt() {
+    const m = prompt.match(/^(.*?)(:)(.*)(\$ )$/);
+    return m ? `\x1b[1;32m${m[1]}\x1b[0m:\x1b[1;34m${m[3]}\x1b[0m$ ` : prompt;
+  }
+  function redraw() {
+    term.write('\r\x1b[2K' + paintPrompt() + buf + '\r');
+    const col = prompt.length + cur;
+    if (col > 0) term.write(`\x1b[${col}C`);
+  }
+  function newPrompt() { prompt = session.prompt(); buf = ''; cur = 0; redraw(); }
+
+  function saveHistory() {
+    try { localStorage.setItem('fslab.history', JSON.stringify(history.slice(-200))); } catch (e) {}
+  }
+
+  async function persist() {
+    await new Promise(res => py.FS.syncfs(false, () => res()));
+  }
+
+  function refreshInfo() {
+    const s = JSON.parse(session.info());
+    $('ex').innerHTML = `exercise <b>#${s.seed}</b> · level ${s.level}`;
+    $('cmds').innerHTML = `commands <b>${s.commands}</b>`;
+    const v = $('viol');
+    v.innerHTML = `violations <b>${s.violations}</b>`; v.className = 'chip' + (s.violations ? ' bad' : '');
+    const st = $('status');
+    st.textContent = s.solved ? 'solved ✔' : 'not solved'; st.className = 'chip' + (s.solved ? ' ok' : '');
+  }
+
+  async function submit(line) {
+    term.write('\r\n');
+    const l = line.trim();
+    if (l) {
+      if (history[history.length - 1] !== l) history.push(l);
+      saveHistory();
+      await new Promise(r => setTimeout(r, 0));
+      const out = session.run(l);
+      if (l === 'clear') term.clear();
+      term.write(out.replace(/\x1b\[2J\x1b\[H/g, '\x1b[2J\x1b[H'));
+      await persist();
+      refreshInfo();
+    }
+    hIdx = history.length; draft = '';
+    newPrompt();
+  }
+
+  function complete() {
+    const line = buf.slice(0, cur);
+    const c = JSON.parse(session.complete(line));
+    if (!c.length) return;
+    const text = line.slice(line.lastIndexOf(' ') + 1);
+    let common = c[0];
+    for (const x of c) { while (!x.startsWith(common)) common = common.slice(0, -1); }
+    if (common.length > text.length) {
+      const add = common.slice(text.length);
+      buf = buf.slice(0, cur) + add + buf.slice(cur); cur += add.length;
+    } else if (c.length > 1) {
+      term.write('\r\n' + c.map(x => x.trim()).join('  ') + '\r\n');
+    }
+    redraw();
+  }
+
+  async function onKey(d) {
+    if (busy) return;
+    const seqs = { '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left',
+                   '\x1b[H': 'home', '\x1b[F': 'end', '\x1b[3~': 'del', '\x1bOH': 'home', '\x1bOF': 'end' };
+    const items = [];
+    for (let i = 0; i < d.length;) {
+      if (d[i] === '\x1b') {
+        const k = Object.keys(seqs).find(s => d.startsWith(s, i));
+        if (k) { items.push(seqs[k]); i += k.length; } else i++;
+      } else items.push(d[i++]);
+    }
+    for (const k of items) {
+      if (k === '\r' || k === '\n') {
+        busy = true;
+        try { await submit(buf); } finally { busy = false; }
+      } else if (k === '\x7f' || k === '\b') {
+        if (cur > 0) { buf = buf.slice(0, cur - 1) + buf.slice(cur); cur--; redraw(); }
+      } else if (k === 'del') {
+        buf = buf.slice(0, cur) + buf.slice(cur + 1); redraw();
+      } else if (k === 'left') { if (cur > 0) { cur--; redraw(); } }
+      else if (k === 'right') { if (cur < buf.length) { cur++; redraw(); } }
+      else if (k === 'home' || k === '\x01') { cur = 0; redraw(); }
+      else if (k === 'end' || k === '\x05') { cur = buf.length; redraw(); }
+      else if (k === 'up') {
+        if (hIdx > 0) { if (hIdx === history.length) draft = buf; hIdx--; buf = history[hIdx]; cur = buf.length; redraw(); }
+      } else if (k === 'down') {
+        if (hIdx < history.length) { hIdx++; buf = hIdx === history.length ? draft : history[hIdx]; cur = buf.length; redraw(); }
+      } else if (k === '\x15') { buf = buf.slice(cur); cur = 0; redraw(); }
+      else if (k === '\x0b') { buf = buf.slice(0, cur); redraw(); }
+      else if (k === '\x03') { term.write('^C\r\n'); newPrompt(); }
+      else if (k === '\x0c') { term.clear(); newPrompt(); }
+      else if (k === '\t') { complete(); }
+      else if (k >= ' ' && k !== '\x7f') { buf = buf.slice(0, cur) + k + buf.slice(cur); cur++; redraw(); }
+    }
+  }
+
+  term.onData(d => { chain = chain.then(() => onKey(d)); });
+  window.addEventListener('resize', () => { fit.fit(); setWidth(); });
+  function setWidth() { if (py) py.runPython(`import webcmds; webcmds.WIDTH = ${term.cols}`); }
+
+  document.querySelectorAll('button.act').forEach(b => b.addEventListener('click', () => {
+    if (busy) return;
+    buf = b.dataset.cmd; cur = buf.length; redraw();
+    chain = chain.then(async () => { busy = true; try { await submit(buf); } finally { busy = false; } });
+    term.focus();
+  }));
+
+  // ---- boot Pyodide ----------------------------------------------------------
+  async function boot() {
+    term.write('\x1b[2mLoading Python in your browser (first visit takes a few seconds)…\x1b[0m');
+    py = await loadPyodide();
+    for (const f of ['fslab.py', 'webcmds.py']) {
+      py.FS.writeFile('/home/pyodide/' + f, await (await fetch(f)).text());
+    }
+    py.FS.mkdir('/lab');
+    py.FS.mount(py.FS.filesystems.IDBFS, {}, '/lab');   // the lab survives page reloads
+    await new Promise((res, rej) => py.FS.syncfs(true, e => e ? rej(e) : res()));
+
+    const seed = /^\d+$/.test(params.get('seed') || '') ? params.get('seed') : 'None';
+    const level = ['1', '2', '3'].includes(params.get('level')) ? params.get('level') : '2';
+    window.askConfirm = q => window.confirm(q);
+    py.runPython(`
+import sys, js
+sys.path.insert(0, '/home/pyodide')
+import webcmds
+session = webcmds.Session('/lab', lambda q: js.askConfirm(q), seed=${seed}, level=${level})
+webcmds.WIDTH = ${term.cols}
+`);
+    session = py.globals.get('session');
+    await persist();
+    term.reset();
+    term.write(session.banner());
+    refreshInfo();
+    document.querySelectorAll('button.act').forEach(b => b.disabled = false);
+    $('conn').textContent = 'ready · progress is saved in this browser';
+    busy = false;
+    newPrompt();
+    term.focus();
+  }
+  boot().catch(e => { term.write('\r\n\x1b[31mCould not start: ' + e + '\x1b[0m\r\n'); $('conn').textContent = 'error'; });
+</script>
+</body>
+</html>
