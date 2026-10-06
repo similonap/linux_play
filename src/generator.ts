@@ -1,6 +1,7 @@
 import { Rng, hash32, hex8 } from './rng';
 import { dirname, basename } from './vfs';
 import { Mission, makeMissions } from './missions';
+import { PRESET_USERS } from './world';
 
 export type Mode = 'create' | 'restricted' | 'inherit' | 'exists';
 /** abs: path starts with / or ~ | rel: any other path | home: path starts with ~ | dot: destination is `.` */
@@ -11,6 +12,10 @@ export interface Target {
   type: Kind; mode: Mode; source: string | null; style: Style; token: string | null;
   /** part of a wildcard group: must be copied/moved through a * or ? pattern */
   glob?: boolean;
+  /** required permissions (octal, e.g. '640') and the chmod notation to use (null = either) */
+  perm?: { mode: string; how: 'num' | 'sym' | null };
+  /** required owner and/or group; recursive = everything inside the directory too (chown -R) */
+  own?: { user: string | null; group: string | null; recursive: boolean };
 }
 /** A set of files in ~/stock that has to be moved into `dir` with one wildcard pattern. */
 export interface Group {
@@ -25,12 +30,17 @@ export interface Group {
 export interface Junk { type: Kind; rmdirOnly: boolean; style: Style; nonempty: boolean; child?: boolean }
 export type Difficulty = 1 | 2 | 3;
 
-/** What an exercise may practise.  mkdir/touch/cd/ls/tree are always part of it. */
+/**
+ * What an exercise may practise.  There are two kinds of exercise, never mixed:
+ * the tree (folders on: build ~/work, with the topics from copyMove on) or the
+ * assignments (folders off: navigation, users, groups, rights).
+ */
 export interface Features {
-  folders: boolean;   // build a folder structure in ~/work (the topics below only apply when this is on)
+  folders: boolean;   // true = tree exercise, false = assignments
   navigation: boolean; // lab 3: ls /etc, cd /var/log, cd -, cd .. ...
   users: boolean;     // lab 3: useradd, adduser, passwd, su, sudo, whoami, userdel
   groups: boolean;    // lab 3: groupadd, usermod, groups, members, id, groupmod, groupdel
+  rights: boolean;    // lab 4: the assignments with lab4a/b/c, chmod, chown and ls -l
   copyMove: boolean;  // items that must be brought over with cp/mv (★)
   abs: boolean;       // absolute paths
   rel: boolean;       // relative paths (including ..)
@@ -40,15 +50,21 @@ export interface Features {
   question: boolean;  // wildcard ?
   remove: boolean;    // things to delete (rm, rm -r)
   rmdirOnly: boolean; // empty directories that must go with rmdir (needs remove)
+  chmod: boolean;     // items in ~/work that need certain permissions
+  chown: boolean;     // items in ~/work that need another owner / group
 }
-export const FEATURE_KEYS = ['folders', 'navigation', 'users', 'groups', 'copyMove', 'abs', 'rel', 'home', 'dot', 'star', 'question', 'remove', 'rmdirOnly'] as const;
+export const FEATURE_KEYS = ['folders', 'navigation', 'users', 'groups', 'rights', 'copyMove', 'abs', 'rel', 'home', 'dot', 'star', 'question',
+  'remove', 'rmdirOnly', 'chmod', 'chown'] as const;
 export type FeatureKey = typeof FEATURE_KEYS[number];
+/** The topics of an assignments exercise; all the other keys (except folders) belong to the tree. */
+export const MISSION_KEYS = ['navigation', 'users', 'groups', 'rights'] as const;
+const TREE_KEYS = FEATURE_KEYS.filter(k => k !== 'folders' && !(MISSION_KEYS as readonly string[]).includes(k)) as FeatureKey[];
 
 /** Difficulty = size of the exercise + which features are switched on by default. */
 export interface Options { difficulty: Difficulty; features: Features }
 
-const ALL_OFF: Features = { folders: false, navigation: false, users: false, groups: false, copyMove: false, abs: false, rel: false, home: false, dot: false,
-  star: false, question: false, remove: false, rmdirOnly: false };
+const ALL_OFF: Features = { folders: false, navigation: false, users: false, groups: false, rights: false, copyMove: false, abs: false, rel: false,
+  home: false, dot: false, star: false, question: false, remove: false, rmdirOnly: false, chmod: false, chown: false };
 const EASY: Features = { ...ALL_OFF, folders: true, copyMove: true, abs: true, rel: true, remove: true, rmdirOnly: true };
 export const PRESETS: Record<Difficulty, Features> = {
   1: EASY,
@@ -56,22 +72,25 @@ export const PRESETS: Record<Difficulty, Features> = {
   3: { ...EASY, home: true, star: true, question: true, dot: true },
 };
 
-export const presetOptions = (difficulty: Difficulty): Options => ({ difficulty, features: { ...PRESETS[difficulty] } });
+/** All assignments on: the "preset" of an assignments exercise. */
+const TASKS: Features = { ...ALL_OFF, navigation: true, users: true, groups: true, rights: true };
 
-/** Fix combinations that make no sense (. needs cp/mv, the rmdir rule needs deleting). */
+export const presetOptions = (difficulty: Difficulty, kind: 'tree' | 'tasks' = 'tree'): Options =>
+  ({ difficulty, features: { ...(kind === 'tree' ? PRESETS[difficulty] : TASKS) } });
+
+/** Pick one kind of exercise and fix combinations that make no sense (. needs cp/mv, the rmdir rule needs deleting). */
 export function normalizeFeatures(f: Partial<Features>): Features {
   const n: Features = { ...ALL_OFF, ...f, folders: f.folders ?? true };
-  if (!n.folders) {   // no folder structure: none of its topics can appear
-    for (const k of ['copyMove', 'abs', 'rel', 'home', 'dot', 'star', 'question', 'remove', 'rmdirOnly'] as const) n[k] = false;
-    if (!n.navigation && !n.users && !n.groups) n.folders = true;
-  }
+  if (!n.folders && !MISSION_KEYS.some(k => n[k])) n.folders = true;   // assignments without any topic: a tree after all
+  for (const k of n.folders ? MISSION_KEYS : TREE_KEYS) n[k] = false;  // never both kinds in one exercise
   if (!n.copyMove) n.dot = false;
   if (!n.remove) n.rmdirOnly = false;
   return n;
 }
 
 /** True when the features differ from the preset of the chosen difficulty. */
-export const isCustom = (o: Options): boolean => FEATURE_KEYS.some(k => o.features[k] !== PRESETS[o.difficulty][k]);
+export const isCustom = (o: Options): boolean =>
+  FEATURE_KEYS.some(k => o.features[k] !== (o.features.folders ? PRESETS[o.difficulty] : TASKS)[k]);
 
 export const sameOptions = (a: Options, b: Options): boolean =>
   a.difficulty === b.difficulty && FEATURE_KEYS.every(k => a.features[k] === b.features[k]);
@@ -131,6 +150,8 @@ export function generate(seed: number, options: Options): Spec {
       for (const [rel, n] of Object.entries(g.targets)) {
         if (n.type === 'dir' && n.mode === 'restricted') n.token = hex8(hash32(`${seed}:${rel}`));
       }
+      // own random stream, so switching these on does not change the rest of the exercise
+      addRights(new Rng(seed ^ 0x5bd1e995), opts.difficulty, opts.features, g.targets);
       return { ...g, missions, options: opts, seed, level: opts.difficulty, created: new Date().toISOString() };
     }
   }
@@ -315,6 +336,53 @@ function tryGenerate(rng: Rng, cfg: Cfg, f: Features): { targets: Record<string,
       ...(globFiles.has(rel) ? { glob: true } : {}) };
   }
   return { targets, junk, groups };
+}
+
+// ---- permissions (chmod) and ownership (chown) on items of the structure ----------------
+/** Files: never the default 644.  Directories keep rwx for the owner, so the student can still work inside. */
+const FILE_MODES = ['600', '640', '400', '440', '444', '700', '750', '755', '664', '660', '604', '040', '004'];
+const DIR_MODES = ['700', '750', '711', '770', '775', '705'];
+/** Groups `student` is a member of: changing to one of these needs no sudo. */
+const OWN_GROUPS = ['users', 'audio', 'video', 'plugdev', 'cdrom'];
+
+function addRights(rng: Rng, d: Difficulty, f: Features, targets: Record<string, Target>): void {
+  const rels = Object.keys(targets);
+  const files = rels.filter(r => targets[r].type === 'file');
+  const dirs = rels.filter(r => targets[r].type === 'dir');
+  const inside = (r: string, dir: string) => r.startsWith(dir + '/');
+  const taken = new Set<string>();
+  if (f.chown) {
+    const pick = (pool: string[]) => {
+      const free = pool.filter(r => !taken.has(r) && ![...taken].some(t => targets[t].own?.recursive && inside(r, t)));
+      return free.length ? rng.choice(free) : null;
+    };
+    const give = (rel: string | null, own: Target['own']) => {
+      if (!rel) return;
+      targets[rel].own = own;
+      taken.add(rel);
+      if (own!.recursive) for (const r of rels) if (inside(r, rel)) taken.add(r);
+    };
+    if (d >= 3) {   // a whole directory with chown -R; it must have something inside
+      const u = rng.choice(PRESET_USERS);
+      give(pick(dirs.filter(r => rels.some(x => inside(x, r)))), { user: u, group: u, recursive: true });
+    }
+    const u = rng.choice(PRESET_USERS);
+    give(pick(files), d === 1 ? { user: u, group: null, recursive: false }
+      : { user: u, group: rng.choice([u, 'users', 'audio', 'video']), recursive: false });
+    if (d >= 2) give(pick(files), { user: null, group: rng.choice(OWN_GROUPS), recursive: false });
+  }
+  if (f.chmod) {
+    const free = (pool: string[]) => pool.filter(r => !taken.has(r));
+    const chosen: string[] = [];
+    if (d >= 3 && free(dirs).length) chosen.push(rng.choice(free(dirs)));
+    chosen.push(...rng.sample(free(files), Math.min(2, free(files).length)));
+    // easy: any notation; otherwise both digits and letters, so both are practised
+    const hows: ('num' | 'sym' | null)[] = chosen.map((_, i) => (d === 1 ? null : i % 2 ? 'sym' : 'num'));
+    if (d > 1) rng.shuffle(hows);
+    chosen.forEach((r, i) => {
+      targets[r].perm = { mode: rng.choice(targets[r].type === 'dir' ? DIR_MODES : FILE_MODES), how: hows[i] };
+    });
+  }
 }
 
 function patternRegex(pattern: string): RegExp {

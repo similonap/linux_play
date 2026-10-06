@@ -1,6 +1,10 @@
 /** A tiny in-memory POSIX-like file system (directories and files only). */
 
-interface Meta { owner: string; group: string; mode: number }
+interface Meta {
+  owner: string; group: string; mode: number;
+  /** how the last chmod set the mode: with digits (num) or letters (sym) */
+  how?: 'num' | 'sym';
+}
 export interface VFile extends Meta { type: 'file'; content: string; mtime: number }
 export interface VDir extends Meta { type: 'dir'; children: Map<string, VNode>; mtime: number }
 export type VNode = VFile | VDir;
@@ -227,10 +231,10 @@ function clone(n: VNode, owner: { user: string; group: string }): VNode {
   return d;
 }
 
-interface Dumped { t: 'd' | 'f'; m: number; o: string; g: string; p: number; s?: string; c?: Record<string, Dumped> }
+interface Dumped { t: 'd' | 'f'; m: number; o: string; g: string; p: number; h?: 'num' | 'sym'; s?: string; c?: Record<string, Dumped> }
 
 function dump(n: VNode): Dumped {
-  const meta = { m: n.mtime, o: n.owner, g: n.group, p: n.mode };
+  const meta = { m: n.mtime, o: n.owner, g: n.group, p: n.mode, ...(n.how ? { h: n.how } : {}) };
   if (n.type === 'file') return { t: 'f', ...meta, s: n.content };
   const c: Record<string, Dumped> = {};
   for (const [k, v] of n.children) c[k] = dump(v);
@@ -239,7 +243,7 @@ function dump(n: VNode): Dumped {
 
 function load(d: unknown): VNode {
   const x = d as Dumped;
-  const meta = { owner: x.o ?? 'root', group: x.g ?? 'root', mode: x.p ?? (x.t === 'd' ? 0o755 : 0o644) };
+  const meta = { owner: x.o ?? 'root', group: x.g ?? 'root', mode: x.p ?? (x.t === 'd' ? 0o755 : 0o644), ...(x.h ? { how: x.h } : {}) };
   if (x.t === 'f') return { type: 'file', content: String(x.s ?? ''), mtime: x.m, ...meta };
   const dir: VDir = { type: 'dir', children: new Map(), mtime: x.m, ...meta };
   for (const [k, v] of Object.entries(x.c ?? {})) dir.children.set(k, load(v));

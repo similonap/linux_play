@@ -21,7 +21,7 @@ export interface Info {
   missionsDone: number; missionsTotal: number;
 }
 
-const SAVE_VERSION = 3;
+const SAVE_VERSION = 5;
 
 /** One student's lab, persisted through `store`. */
 export class Session {

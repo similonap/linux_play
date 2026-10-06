@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { generate, presetOptions, normalizeFeatures, FEATURE_KEYS, Options, Features, Difficulty } from './generator';
+import { generate, presetOptions, normalizeFeatures, isCustom, FEATURE_KEYS, Options, Features, Difficulty } from './generator';
 import { Rng } from './rng';
 import { Session, Store } from './session';
 import { ROOT } from './lab';
 import { setLang } from './i18n';
+import { SYM } from './missions';
 
 const memStore = (): Store => { let d: string | null = null; return { load: () => d, save: x => { d = x; } }; };
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
@@ -33,29 +34,30 @@ function solveMissions(s: Session): void {
     if (has('nav-ls-dir')) sh(s, `ls ${p('nav-ls-dir').dir}`);
     if (has('nav-cd-dir')) sh(s, `cd ${p('nav-cd-dir').dir}`);
     sh(s, 'cd');                                   // short way home
-    sh(s, 'touch ~/note');
+    const f = has('nav-touch-home')?.params.file ?? 'note';
+    sh(s, `touch ~/${f}`);
     sh(s, 'cd /var/log');
     sh(s, 'cd ..');
     sh(s, 'cd ..');                                // several steps up to /
     sh(s, 'ls /home/student');
-    sh(s, 'mv home/student/note home/student/Desktop');
+    sh(s, `mv home/student/${f} home/student/Desktop`);
     sh(s, 'cd /home/student');                     // absolute path home
     sh(s, 'cd /');                                 // shortest way to the root
     sh(s, 'cd ~');
   }
-  const n = 'tuseradd';
-  if (has('usr-useradd')) {
+  const n = has('usr-useradd') ? p('usr-useradd').name : '';
+  if (n) {
     sh(s, `sudo useradd ${n}`);
     sh(s, `sudo passwd ${n}`);
   }
-  const k = has('usr-adduser') ? Number(p('usr-adduser').n) : 0;
-  for (let i = 0; i < k; i++) sh(s, `sudo adduser tuser${i}`);
-  for (let i = 0; i < k; i++) {
-    sh(s, `su tuser${i}`);
+  const names = has('usr-adduser') ? p('usr-adduser').names.split(',') : [];
+  for (const u of names) sh(s, `sudo adduser ${u}`);
+  for (const u of names) {
+    sh(s, `su ${u}`);
     sh(s, 'whoami');
     sh(s, 'cd ~');
-    sh(s, 'touch f1 f2');
-    sh(s, 'mkdir d1');
+    sh(s, `touch ${p('usr-su-files').files.split(',').join(' ')}`);
+    sh(s, `mkdir ${p('usr-su-files').dir}`);
     sh(s, 'exit');
   }
   if (has('usr-nohome')) {
@@ -64,7 +66,7 @@ function solveMissions(s: Session): void {
     sh(s, 'exit');
   }
   if (has('usr-root')) { sh(s, 'sudo -i'); sh(s, 'whoami'); sh(s, 'exit'); }
-  if (has('usr-userdel') && k) sh(s, 'sudo userdel -r tuser0');
+  if (has('usr-userdel')) sh(s, `sudo userdel -r ${p('usr-userdel').name}`);
   if (has('grp-create')) for (const g of p('grp-create').names.split(',')) sh(s, `sudo groupadd ${g}`);
   if (has('grp-members')) {
     for (const x of p('grp-members').assign.split(';')) {
@@ -83,6 +85,62 @@ function solveMissions(s: Session): void {
     sh(s, `id ${user}`);
   }
   if (has('grp-del')) sh(s, `sudo groupdel ${p('grp-del').group}`);
+  if (has('p4-adduser')) {
+    for (const u of LAB4) sh(s, `sudo adduser ${u}`);
+    for (const u of LAB4) {
+      sh(s, `su ${u}`);
+      sh(s, 'cd ~');
+      sh(s, `touch ${u}_file1 ${u}_file2 ${u}_file3`);
+      sh(s, `mkdir ${u}_dir`);
+      sh(s, `chmod ${p('p4-exec').mode} ${u}_file${p('p4-exec').file}`);
+      sh(s, `chmod ${p('p4-dir').mode} ${u}_dir`);
+      sh(s, 'll');
+      sh(s, 'exit');
+    }
+  }
+  if (has('p4-move')) {
+    const to = (i: number) => LAB4[(i + (p('p4-move').dir === 'prev' ? 2 : 1)) % 3];
+    LAB4.forEach((u, i) => sh(s, `sudo mv /home/${u}/${u}_file* /home/${to(i)}`));
+    LAB4.forEach((u, i) => sh(s, `sudo chown :${to(i)} /home/${to(i)}/${u}_file2`));
+  }
+  if (has('p4-lsR')) { sh(s, 'cd /home'); sh(s, 'ls -l -R lab4*'); sh(s, 'cd'); }
+  if (has('p4-fixhome')) {
+    const n = p('p4-fixhome').name;
+    sh(s, `sudo mkdir /home/${n}`);
+    sh(s, `sudo chown ${n}:${n} /home/${n}`);
+  }
+  if (has('p4-read')) {
+    sh(s, 'mkdir ~/linux-labo4');
+    for (const u of LAB4) {
+      const { order, bit } = p('p4-read');
+      [...order].forEach((w, i) => {
+        const m = [...'ugo'].map(x => (x === w ? { r: 4, w: 2, x: 1 }[bit]! : 0)).join('');
+        sh(s, `touch ~/linux-labo4/${u}_file${i + 1}`);
+        sh(s, `chmod ${m} ~/linux-labo4/${u}_file${i + 1}`);
+      });
+    }
+  }
+  if (has('p4-sym')) {
+    sh(s, 'mkdir ~/linux-labo4/oef3');
+    sh(s, 'cd ~/linux-labo4/oef3');
+    sh(s, 'touch file1 file2 file3');
+    p('p4-sym').pick.split(',').forEach((x, i) => sh(s, `chmod ${symbolic(SYM[+x].mode.toString(8))} file${i + 1}`));
+    sh(s, 'cd');
+  }
+}
+
+const LAB4 = ['lab4a', 'lab4b', 'lab4c'];
+
+/** chmod letters that turn any mode into `octal`, e.g. 640 -> a-rwx,u+rw,g+r */
+function symbolic(octal: string): string {
+  const m = parseInt(octal, 8);
+  const parts = ['a-rwx'];
+  ['u', 'g', 'o'].forEach((who, i) => {
+    const bits = (m >> (6 - 3 * i)) & 7;
+    const letters = (bits & 4 ? 'r' : '') + (bits & 2 ? 'w' : '') + (bits & 1 ? 'x' : '');
+    if (letters) parts.push(who + '+' + letters);
+  });
+  return parts.join(',');
 }
 
 /** Solve an exercise the way a student would, using only lab commands. */
@@ -114,6 +172,16 @@ function solve(s: Session): void {
     if (j.child) continue;
     const p = path(j.style, rel);
     run(j.rmdirOnly ? `rmdir ${p}` : j.type === 'dir' ? `rm -r ${p}` : `rm ${p}`);
+  }
+  // 4. permissions, then owners last (a file given away is no longer yours to chmod)
+  for (const [rel, n] of Object.entries(targets)) {
+    if (n.perm) run(`chmod ${n.perm.how === 'sym' ? symbolic(n.perm.mode) : n.perm.mode} ${ROOT}/${rel}`);
+  }
+  for (const [rel, n] of Object.entries(targets)) {
+    if (!n.own) continue;
+    const { user, group, recursive } = n.own;
+    if (user) sh(s, `sudo chown ${recursive ? '-R ' : ''}${user}${group ? ':' + group : ''} ${ROOT}/${rel}`);
+    else run(`chown :${group} ${ROOT}/${rel}`);
   }
   solveMissions(s);
 }
@@ -251,6 +319,8 @@ describe('custom settings', () => {
       expect(groups.some(g => g.kind === 'single'), label).toBe(features.question);
       expect(Object.keys(junk).length > 0, label).toBe(features.remove);
       expect(Object.values(junk).some(j => j.rmdirOnly), label).toBe(features.rmdirOnly);
+      expect(t.some(n => n.perm), label).toBe(features.chmod);
+      expect(t.some(n => n.own), label).toBe(features.chown);
       solve(s);
       const out = strip(s.run('check'));
       expect(out, `${label}\n${out}`).toContain('SOLVED');
@@ -289,16 +359,45 @@ describe('custom settings', () => {
   });
 });
 
-const LAB3: Options['features'] = normalizeFeatures({
-  folders: true, navigation: true, users: true, groups: true, copyMove: true, abs: true, rel: true, home: true,
-  dot: true, star: true, question: true, remove: true, rmdirOnly: true,
+/** Every assignment topic: an assignments exercise (no tree). */
+const TASKS: Options['features'] = normalizeFeatures({ folders: false, navigation: true, users: true, groups: true, rights: true });
+const LAB3 = normalizeFeatures({ folders: false, navigation: true, users: true, groups: true });
+
+describe('two kinds of exercise', () => {
+  it('a tree or assignments, never both - whatever the settings say', () => {
+    const mixed = normalizeFeatures({ folders: true, navigation: true, users: true, rights: true, copyMove: true, chmod: true });
+    expect(mixed.folders && mixed.copyMove && mixed.chmod).toBe(true);
+    expect(mixed.navigation || mixed.users || mixed.rights).toBe(false);
+    const tasks = normalizeFeatures({ folders: false, users: true, copyMove: true, chmod: true });
+    expect(tasks.users).toBe(true);
+    expect(tasks.copyMove || tasks.chmod).toBe(false);
+    const rng = new Rng(7);
+    for (let i = 0; i < 200; i++) {
+      const f = normalizeFeatures(Object.fromEntries(FEATURE_KEYS.map(k => [k, rng.next() < 0.5])) as unknown as Features);
+      const s = generate(i + 1, { difficulty: ((i % 3) + 1) as Difficulty, features: f });
+      const hasTree = Object.keys(s.targets).length > 0, hasTasks = (s.missions ?? []).length > 0;
+      expect(hasTree !== hasTasks, JSON.stringify(f)).toBe(true);
+    }
+  });
+
+  it('a link with only tree topics (no folders in the list) is still a tree', () => {
+    const f = normalizeFeatures({ folders: false, copyMove: true, star: true });
+    expect(f.folders && f.copyMove && f.star).toBe(true);
+  });
+
+  it('the assignments have their own preset', () => {
+    expect(presetOptions(2, 'tasks').features).toEqual(TASKS);
+    expect(isCustom(presetOptions(3, 'tasks'))).toBe(false);
+    expect(isCustom({ difficulty: 1, features: LAB3 })).toBe(true);
+  });
 });
 
 describe('lab 3: navigation, users and groups', () => {
-  it('everything switched on is solvable at every difficulty, without rule violations', () => {
+  it('all assignments are solvable at every difficulty, without rule violations', () => {
     for (const difficulty of [1, 2, 3] as Difficulty[]) for (let seed = 1; seed <= 25; seed++) {
-      const s = newSession(seed, { difficulty, features: LAB3 });
+      const s = newSession(seed, { difficulty, features: TASKS });
       expect((s.lab.spec.missions ?? []).length).toBeGreaterThan(8);
+      expect(Object.keys(s.lab.spec.targets)).toHaveLength(0);
       solve(s);
       const out = strip(s.run('check'));
       expect(out, `seed ${seed} d${difficulty}\n${out}`).toContain('SOLVED');
@@ -570,3 +669,142 @@ describe('lab', () => {
     expect(strip(s.run('mv nope z'))).toContain('cannot stat');
   });
 });
+
+const LAB4_TREE: Options['features'] = normalizeFeatures({
+  folders: true, copyMove: true, abs: true, rel: true, home: true, star: true, remove: true, rmdirOnly: true, chmod: true, chown: true,
+});
+
+describe('lab 4: chmod, chown and permissions', () => {
+  const mode = (s: Session, p: string) => (s.lab.fs.get(p)!.mode & 0o777).toString(8);
+
+  it('chmod with digits and with letters, also -w and -R', () => {
+    const s = newSession(1, 1);
+    sh(s, 'touch f');
+    sh(s, 'chmod 640 f');
+    expect(mode(s, `${ROOT}/f`)).toBe('640');
+    sh(s, 'chmod u+x,g-r,o+w f');
+    expect(mode(s, `${ROOT}/f`)).toBe('702');
+    sh(s, 'chmod -w f');
+    expect(mode(s, `${ROOT}/f`)).toBe('500');
+    sh(s, 'chmod +w f');                       // no u/g/o: the umask keeps group/others from getting w
+    expect(mode(s, `${ROOT}/f`)).toBe('700');
+    sh(s, 'chmod a=r f');
+    expect(sh(s, 'ls -l f')).toMatch(/^-r--r--r-- /m);
+    expect(sh(s, 'chmod 9 f')).toContain("invalid mode: '9'");
+    expect(sh(s, 'chmod 644')).toContain("missing operand after '644'");
+    sh(s, 'mkdir -p d/e');
+    sh(s, 'touch d/e/x');
+    sh(s, 'chmod -R 700 d');
+    expect(mode(s, `${ROOT}/d/e/x`)).toBe('700');
+    expect(sh(s, 'chmod 777 /etc/hosts')).toContain('Operation not permitted');
+    expect(sh(s, 'll')).toContain('./');      // ll = ls -alF
+  });
+
+  it('chown: only root gives files away, the owner may pick one of their own groups', () => {
+    const s = newSession(1, 1);
+    sh(s, 'touch f');
+    expect(sh(s, 'chown anna f')).toContain('Operation not permitted');
+    expect(sh(s, 'chown :anna f')).toContain('Operation not permitted');   // student is not in group anna
+    sh(s, 'chown :audio f');                                                // but is in audio
+    expect(s.lab.fs.get(`${ROOT}/f`)!.group).toBe('audio');
+    expect(sh(s, 'chown nobodyx f')).toContain("invalid user: 'nobodyx'");
+    expect(sh(s, 'chown anna:nogrp f')).toContain("invalid group: 'anna:nogrp'");
+    sh(s, 'sudo chown anna: f');                                            // anna and her login group
+    expect(sh(s, 'ls -l f')).toMatch(/ anna +anna /);
+    expect(sh(s, 'chmod 600 f')).toContain('Operation not permitted');      // no longer ours
+    sh(s, 'mkdir -p d/e');
+    sh(s, 'sudo chown -R bram:users d');
+    expect(s.lab.fs.get(`${ROOT}/d/e`)!.owner).toBe('bram');
+    expect(s.lab.fs.get(`${ROOT}/d/e`)!.group).toBe('users');
+  });
+
+  it('the structure shows the permissions and owners, and check enforces them', () => {
+    const features = LAB4_TREE;
+    for (const difficulty of [1, 2, 3] as Difficulty[]) for (let seed = 1; seed <= 25; seed++) {
+      const s = newSession(seed, { difficulty, features });
+      const t = Object.values(s.lab.spec.targets);
+      expect(t.filter(n => n.perm).length).toBeGreaterThanOrEqual(2);
+      if (difficulty > 1) expect(new Set(t.filter(n => n.perm).map(n => n.perm!.how))).toEqual(new Set(['num', 'sym']));
+      if (difficulty === 3) expect(t.some(n => n.own?.recursive)).toBe(true);
+      const task = sh(s, 'task');
+      expect(task).toContain('● permissions');
+      expect(task).toContain('♦');
+      solve(s);
+      expect(sh(s, 'check'), `seed ${seed} d${difficulty}`).toContain('SOLVED');
+      expect(s.info().violations).toBe(0);
+    }
+  });
+
+  it('the wrong notation is refused, also when chmod-ed somewhere else and moved in', () => {
+    const features = normalizeFeatures({ folders: true, chmod: true });
+    let s: Session | undefined;
+    for (let seed = 1; !s; seed++) {
+      const c = newSession(seed, { difficulty: 2, features });
+      if (Object.values(c.lab.spec.targets).some(n => n.type === 'file' && n.perm?.how === 'num' && n.mode === 'create')) s = c;
+    }
+    const [rel, n] = Object.entries(s.lab.spec.targets).find(([, n]) => n.type === 'file' && n.perm?.how === 'num' && n.mode === 'create')!;
+    solve(s);
+    expect(sh(s, 'check')).toContain('SOLVED');
+    expect(sh(s, `chmod u+x ${ROOT}/${rel}`)).toContain('NUMERIC');
+    expect(s.info().violations).toBe(1);
+    // same permissions set with letters outside ~/work, then moved over the original
+    sh(s, `touch ${ROOT}/tmpfile`);
+    sh(s, `chmod ${symbolic(n.perm!.mode)} ${ROOT}/tmpfile`);
+    sh(s, `mv ${ROOT}/tmpfile ${ROOT}/${rel}`);
+    const out = sh(s, 'check');
+    expect(out).toContain('wrong notation');
+    expect(out).not.toContain('SOLVED');
+  });
+
+  it('the lab 4 assignments are solvable at every difficulty, also together with lab 3', () => {
+    for (const features of [normalizeFeatures({ folders: false, rights: true }), TASKS]) {
+      for (const difficulty of [1, 2, 3] as Difficulty[]) for (let seed = 1; seed <= 8; seed++) {
+        const s = newSession(seed, { difficulty, features });
+        const kinds = (s.lab.spec.missions ?? []).map(m => m.kind);
+        expect(kinds).toContain('p4-read');
+        expect(kinds.includes('p4-fixhome')).toBe(difficulty === 3);
+        solve(s);
+        const out = sh(s, 'check');
+        expect(out, `${JSON.stringify(features)} seed ${seed} d${difficulty}\n${out}`).toContain('SOLVED');
+        expect(s.info().violations).toBe(0);
+      }
+    }
+  });
+
+  it('lab 4 assignments differ between exercises', () => {
+    const features = normalizeFeatures({ folders: false, rights: true });
+    const seen = new Set<string>();
+    for (let seed = 1; seed <= 20; seed++) seen.add(JSON.stringify(generate(seed, { difficulty: 3, features }).missions));
+    expect(seen.size).toBeGreaterThan(15);
+  });
+
+  it('lab 4 assignments look at the result, the notation and where commands were run', () => {
+    const s = newSession(1, { difficulty: 3, features: normalizeFeatures({ folders: false, rights: true }) });
+    expect(s.lab.sys.users.find(u => u.name === 'user1')?.via).toBe('useradd');
+    expect(s.lab.fs.exists('/home/user1')).toBe(false);
+    const done = () => s.lab.state.done;
+    const { order, bit } = s.lab.spec.missions!.find(m => m.kind === 'p4-read')!.params;
+    const want = [...order].map(w => [...'ugo'].map(x => (x === w ? { r: 4, w: 2, x: 1 }[bit]! : 0)).join(''));
+    sh(s, 'mkdir ~/linux-labo4');
+    for (const u of LAB4) for (const i of [1, 2, 3]) sh(s, `touch ~/linux-labo4/${u}_file${i}`);
+    for (const u of LAB4) {
+      sh(s, `chmod ${symbolic(want[0])} ~/linux-labo4/${u}_file1`);   // right mode, but with letters
+      sh(s, `chmod ${want[1]} ~/linux-labo4/${u}_file2`);
+      sh(s, `chmod ${want[2]} ~/linux-labo4/${u}_file3`);
+    }
+    expect(done()).not.toContain('p4-read');
+    for (const u of LAB4) sh(s, `chmod ${want[0]} ~/linux-labo4/${u}_file1`);
+    expect(done()).toContain('p4-read');
+    for (const u of LAB4) sh(s, `sudo adduser ${u}`);
+    sh(s, 'ls -l -R /home/lab4*');                             // not from /home
+    expect(done()).not.toContain('p4-lsR');
+    sh(s, 'cd /home');
+    sh(s, 'ls -lR lab4*');
+    expect(done()).toContain('p4-lsR');
+    sh(s, 'sudo mkdir /home/user1');
+    expect(done()).not.toContain('p4-fixhome');                // still owned by root
+    sh(s, 'sudo chown user1:user1 /home/user1');
+    expect(done()).toContain('p4-fixhome');
+  });
+});
+

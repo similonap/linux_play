@@ -5,6 +5,7 @@
  */
 import { VFS, FsError, basename, dirname, isAbs, join, normpath, VNode } from './vfs';
 import { blue, bold } from './ansi';
+import { System, groupBy, groupById, groupsOf, userBy } from './world';
 
 export interface Ctx {
   fs: VFS;
@@ -13,6 +14,9 @@ export interface Ctx {
   print: (s?: string) => void;
   /** may the current user read (r) / write (w) / enter (x) this path? */
   can: (path: string, bit: 'r' | 'w' | 'x') => boolean;
+  /** who runs the command (root through sudo) and the machine, for chmod/chown */
+  actor: string;
+  sys: System;
 }
 
 /** Throws EACCES unless the user may add or remove entries in this directory. */
@@ -260,6 +264,9 @@ function human(n: number): string {
   return `${Math.floor(n)}T`;
 }
 
+/** The nine permission letters, e.g. 0o640 -> rw-r----- */
+export const permString = (mode: number) => [...'rwxrwxrwx'].map((ch, i) => (mode & (1 << (8 - i)) ? ch : '-')).join('');
+
 /** e.g. drwxr-xr-x, with the sticky bit shown as a t (like /tmp). */
 function modeString(n: VNode): string {
   const bits = 'rwxrwxrwx';
@@ -429,6 +436,144 @@ function tree(c: Ctx, args: string[]): number {
   return 0;
 }
 
+// ---- chmod / chown -----------------------------------------------------------
+
+const SYMBOLIC = /^[ugoa]*(?:[-+=][rwxX]*)+$/;
+
+/**
+ * Split chmod's arguments: options, the mode and the files.  A mode like -w
+ * looks like an option, so the first word that is a valid mode is the mode.
+ */
+export function chmodArgs(args: string[]): { flags: Set<string>; mode?: string; files: string[]; bad?: string } {
+  const flags = new Set<string>();
+  const files: string[] = [];
+  let mode: string | undefined;
+  let rest = false;
+  for (const a of args) {
+    if (!rest && a === '--') { rest = true; continue; }
+    if (!rest && mode === undefined && /^-[rwxX]+$/.test(a)) { mode = a; continue; }
+    if (!rest && /^--?[A-Za-z]/.test(a)) {
+      const names = a.startsWith('--') ? [a.slice(2)] : [...a.slice(1)];
+      for (const n of names) {
+        if (!['R', 'v', 'c', 'f', 'recursive', 'verbose', 'changes', 'silent', 'quiet'].includes(n)) return { flags, files, bad: a };
+        flags.add(n === 'recursive' ? 'R' : n);
+      }
+      continue;
+    }
+    if (mode === undefined) mode = a; else files.push(a);
+  }
+  return { flags, mode, files };
+}
+
+/** Is this chmod mode written with digits (num) or with letters (sym)?  null = not a valid mode. */
+export function modeNotation(mode: string): 'num' | 'sym' | null {
+  if (/^[0-7]{1,4}$/.test(mode)) return 'num';
+  return mode.split(',').every(m => SYMBOLIC.test(m)) ? 'sym' : null;
+}
+
+/** The new mode after applying a chmod mode (digits or letters) to `old`. */
+export function applyMode(old: number, mode: string, isDir: boolean): number {
+  if (modeNotation(mode) === 'num') return parseInt(mode, 8) & 0o7777;
+  let m = old;
+  for (const clause of mode.split(',')) {
+    const who = /^[ugoa]*/.exec(clause)![0];
+    // no u/g/o/a: like `a`, but the umask (022) keeps + and = from giving write to group/others
+    const mask = (who.includes('a') ? 0o777 : (who.includes('u') ? 0o700 : 0) | (who.includes('g') ? 0o070 : 0) | (who.includes('o') ? 0o007 : 0))
+      || 0o777;
+    const umask = who === '' ? 0o022 : 0;
+    for (const [, op, perms] of clause.slice(who.length).matchAll(/([-+=])([rwxX]*)/g)) {
+      let bits = 0;
+      for (const ch of perms) {
+        if (ch === 'r') bits |= 0o444;
+        if (ch === 'w') bits |= 0o222;
+        if (ch === 'x' || (ch === 'X' && (isDir || (m & 0o111) !== 0))) bits |= 0o111;
+      }
+      bits &= mask;
+      if (op === '+') m |= bits & ~umask;
+      else if (op === '-') m &= ~bits;
+      else m = (m & ~mask) | (bits & ~umask);
+    }
+  }
+  return m;
+}
+
+function chmod(c: Ctx, args: string[]): number {
+  const { flags, mode, files, bad } = chmodArgs(args);
+  if (bad) return fail(c, `chmod: invalid option -- '${bad.replace(/^-+/, '')}'\nTry 'chmod --help' for more information.`);
+  if (mode === undefined) return fail(c, "chmod: missing operand\nTry 'chmod --help' for more information.");
+  if (!files.length) return fail(c, `chmod: missing operand after '${mode}'\nTry 'chmod --help' for more information.`);
+  const how = modeNotation(mode);
+  if (!how) return fail(c, `chmod: invalid mode: '${mode}'\nTry 'chmod --help' for more information.`);
+  let rc = 0;
+  for (const p of files) {
+    const full = resolve(c.cwd, p);
+    if (!c.fs.exists(full)) { rc = fail(c, `chmod: cannot access '${p}': No such file or directory`); continue; }
+    for (const x of [full, ...(flags.has('R') ? c.fs.descendants(full) : [])]) {
+      const n = c.fs.get(x)!;
+      const label = x === full ? p : join(p, x.slice(full.length + 1));
+      if (c.actor !== 'root' && n.owner !== c.actor) {
+        if (!flags.has('f')) rc = fail(c, `chmod: changing permissions of '${label}': Operation not permitted`);
+        else rc = 1;
+        continue;
+      }
+      const before = n.mode;
+      c.fs.setMeta(x, { mode: (n.mode & ~0o7777) | applyMode(n.mode & 0o7777, mode, n.type === 'dir'), how });
+      if (flags.has('v') || (flags.has('c') && before !== n.mode)) {
+        const o = (m: number) => (m & 0o7777).toString(8).padStart(4, '0');
+        c.print(before === n.mode ? `mode of '${label}' retained as ${o(before)} (${modeString(n).slice(1)})`
+          : `mode of '${label}' changed from ${o(before)} (${modeString({ ...n, mode: before }).slice(1)}) to ${o(n.mode)} (${modeString(n).slice(1)})`);
+      }
+    }
+  }
+  return rc;
+}
+
+function chown(c: Ctx, args: string[]): number {
+  let r;
+  try { r = parse('chown', args, 'Rvcfh', ['recursive', 'verbose', 'changes', 'silent', 'quiet']); } catch (e) { return fail(c, (e as Error).message); }
+  const { flags, ops } = r;
+  if (!ops.length) return fail(c, "chown: missing operand\nTry 'chown --help' for more information.");
+  const spec = ops[0];
+  if (ops.length < 2) return fail(c, `chown: missing operand after '${spec}'\nTry 'chown --help' for more information.`);
+  // OWNER, OWNER:GROUP, OWNER: (= the owner's login group) or :GROUP
+  const i = spec.indexOf(':');
+  const uname = i < 0 ? spec : spec.slice(0, i);
+  let gname = i < 0 ? '' : spec.slice(i + 1);
+  const u = uname ? userBy(c.sys, uname) : undefined;
+  if (uname && !u) return fail(c, `chown: invalid user: '${spec}'`);
+  if (i >= 0 && !gname && u) gname = groupById(c.sys, u.gid)?.name ?? '';
+  if (gname && !groupBy(c.sys, gname)) return fail(c, `chown: invalid group: '${spec}'`);
+  const mine = groupsOf(c.sys, c.actor).map(g => g.name);
+  const rec = has(flags, 'R', 'recursive');
+  let rc = 0;
+  for (const p of ops.slice(1)) {
+    const full = resolve(c.cwd, p);
+    if (!c.fs.exists(full)) { rc = fail(c, `chown: cannot access '${p}': No such file or directory`); continue; }
+    for (const x of [full, ...(rec ? c.fs.descendants(full) : [])]) {
+      const n = c.fs.get(x)!;
+      const label = x === full ? p : join(p, x.slice(full.length + 1));
+      // only root gives a file away; the owner may only pick one of their own groups
+      const allowed = c.actor === 'root'
+        || (n.owner === c.actor && (!uname || uname === c.actor) && (!gname || mine.includes(gname)));
+      if (!allowed) {
+        if (!has(flags, 'f', 'silent', 'quiet')) rc = fail(c, `chown: changing ownership of '${label}': Operation not permitted`);
+        else rc = 1;
+        continue;
+      }
+      const before = `${n.owner}:${n.group}`;
+      c.fs.setMeta(x, { ...(uname ? { owner: uname } : {}), ...(gname ? { group: gname } : {}) });
+      if (has(flags, 'v', 'verbose') || (has(flags, 'c', 'changes') && before !== `${n.owner}:${n.group}`)) {
+        c.print(before === `${n.owner}:${n.group}` ? `ownership of '${label}' retained as ${before}`
+          : `changed ownership of '${label}' from ${before} to ${n.owner}:${n.group}`);
+      }
+    }
+  }
+  return rc;
+}
+
+/** Ubuntu's alias ll='ls -alF'. */
+const ll = (c: Ctx, args: string[]) => ls(c, ['-alF', ...args]);
+
 export const COMMANDS: Record<string, (c: Ctx, args: string[]) => number> = {
-  ls, cp, mv, rm, rmdir, mkdir, touch, tree,
+  ls, ll, cp, mv, rm, rmdir, mkdir, touch, tree, chmod, chown,
 };

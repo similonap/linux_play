@@ -4,7 +4,7 @@ import '@xterm/xterm/css/xterm.css';
 import './style.css';
 import { Session, Store } from './session';
 import { Lang, getLang, setLang, difficultyName } from './i18n';
-import { Options, Features, FEATURE_KEYS, FeatureKey, Difficulty, presetOptions, normalizeFeatures, isCustom } from './generator';
+import { Options, Features, FEATURE_KEYS, MISSION_KEYS, FeatureKey, Difficulty, presetOptions, normalizeFeatures, isCustom } from './generator';
 
 const I18N: Record<Lang, Record<string, string>> = {
   nl: {
@@ -14,6 +14,10 @@ const I18N: Record<Lang, Record<string, string>> = {
     setTitle: 'Instellingen', setDifficulty: 'Moeilijkheid', setFeatures: 'Wat wil je oefenen?',
     setDiffHint: 'De moeilijkheid bepaalt de grootte van de oefening en welke onderdelen standaard aan staan.',
     setFeaturesHint: 'Aanmaken (mkdir, touch) en navigeren (cd, ls, tree) zit er altijd in.',
+    setTasksHint: 'Elke opdracht wordt afgevinkt zodra je ze gedaan hebt (zie task en check).',
+    setKind: 'Soort oefening', kindTree: 'Boom', kindTasks: 'Opdrachten',
+    setKindTreeHint: 'Zorg dat ~/work er exact uitziet zoals de getekende boom.',
+    setKindTasksHint: 'Een lijst opdrachten om uit te voeren (navigeren, users, groepen, rechten).',
     setQuick: 'Snelkeuze', missions: 'opdrachten',
     setCancel: 'Annuleer', setStart: 'Start nieuwe oefening', custom: 'aangepast',
     setConfirm: 'Je huidige oefening wordt vervangen. Doorgaan?',
@@ -30,6 +34,10 @@ const I18N: Record<Lang, Record<string, string>> = {
     setTitle: 'Settings', setDifficulty: 'Difficulty', setFeatures: 'What do you want to practise?',
     setDiffHint: 'Difficulty sets the size of the exercise and which topics are on by default.',
     setFeaturesHint: 'Creating (mkdir, touch) and navigating (cd, ls, tree) are always included.',
+    setTasksHint: 'Each assignment is ticked off as soon as you have done it (see task and check).',
+    setKind: 'Kind of exercise', kindTree: 'Tree', kindTasks: 'Assignments',
+    setKindTreeHint: 'Make ~/work look exactly like the tree that is drawn.',
+    setKindTasksHint: 'A list of assignments to carry out (navigation, users, groups, permissions).',
     setQuick: 'Quick pick', missions: 'assignments',
     setCancel: 'Cancel', setStart: 'Start new exercise', custom: 'customised',
     setConfirm: 'Your current exercise will be replaced. Continue?',
@@ -151,7 +159,7 @@ function submit(line: string): void {
   if (l || asking) {
     if (!asking && history[history.length - 1] !== l) { history.push(l); saveHistory(); }
     const out = session.run(l);
-    if (l === 'clear') term.clear();
+    if (out.startsWith('\x1b[2J')) term.clear();   // clear, new, reset: also drop the scrollback
     term.write(out);
     renderInfo();
   }
@@ -244,10 +252,11 @@ document.querySelectorAll<HTMLElement>('.lang button').forEach(b => b.addEventLi
 
 // ---- settings dialog ----------------------------------------------------------------
 const FEATURES: Record<FeatureKey, { nl: [string, string]; en: [string, string] }> = {
-  folders: { nl: ['Mappenstructuur bouwen', 'een structuur in ~/work maken en opruimen (de onderdelen hieronder horen hierbij)'], en: ['Build a folder structure', 'make and tidy a structure in ~/work (the topics below belong to this)'] },
+  folders: { nl: ['', ''], en: ['', ''] },   // the kind switch, not a checkbox
   navigation: { nl: ['Navigeren door het systeem', 'ls /etc, cd /var/log, cd -, cd .. (labo 3)'], en: ['Navigating the system', 'ls /etc, cd /var/log, cd -, cd .. (lab 3)'] },
   users: { nl: ['Gebruikers', 'useradd, adduser, passwd, userdel, su, sudo, whoami (labo 3)'], en: ['Users', 'useradd, adduser, passwd, userdel, su, sudo, whoami (lab 3)'] },
   groups: { nl: ['Groepen', 'groupadd, groupdel, groupmod, usermod, groups, members, id (labo 3)'], en: ['Groups', 'groupadd, groupdel, groupmod, usermod, groups, members, id (lab 3)'] },
+  rights: { nl: ['Rechten & eigenaars (opdrachten)', 'de oefeningen van labo 4: lab4a/b/c, chmod, chown, ls -l'], en: ['Permissions & owners (assignments)', 'the exercises of lab 4: lab4a/b/c, chmod, chown, ls -l'] },
   copyMove: { nl: ['Kopiëren en verplaatsen', 'cp en mv i.p.v. mkdir/touch (★)'], en: ['Copying and moving', 'cp and mv instead of mkdir/touch (★)'] },
   abs: { nl: ['Absolute paden', 'beginnen met /'], en: ['Absolute paths', 'start with /'] },
   rel: { nl: ['Relatieve paden', 'vanaf de huidige map, ook met ..'], en: ['Relative paths', 'from the current directory, also with ..'] },
@@ -257,16 +266,32 @@ const FEATURES: Record<FeatureKey, { nl: [string, string]; en: [string, string] 
   question: { nl: ['Wildcard ?', 'precies één willekeurig teken'], en: ['Wildcard ?', 'exactly one arbitrary character'] },
   remove: { nl: ['Verwijderen', 'rm en rm -r'], en: ['Deleting', 'rm and rm -r'] },
   rmdirOnly: { nl: ['Lege mappen enkel met rmdir', 'rm mag dan niet (vraagt verwijderen)'], en: ['Empty directories only with rmdir', 'rm is not allowed then (needs deleting)'] },
+  chmod: { nl: ['Rechten in de structuur (chmod)', 'items met vaste rechten, met cijfers of met letters (●)'], en: ['Permissions in the structure (chmod)', 'items with set permissions, with digits or letters (●)'] },
+  chown: { nl: ['Eigenaar in de structuur (chown)', 'items die van iemand anders of een andere groep moeten zijn (♦)'], en: ['Owner in the structure (chown)', 'items that must belong to someone else or another group (♦)'] },
 };
 const QUICK: { nl: string; en: string; features: Partial<Features> }[] = [
-  { nl: 'Labo 3 · bestanden', en: 'Lab 3 · files', features: { folders: true, navigation: true, copyMove: true, abs: true, rel: true, home: true, dot: true, star: true, question: true, remove: true } },
-  { nl: 'Labo 3 · users & groups', en: 'Lab 3 · users & groups', features: { folders: false, users: true, groups: true } },
-  { nl: 'Labo 3 · alles', en: 'Lab 3 · everything', features: { folders: true, navigation: true, users: true, groups: true, copyMove: true, abs: true, rel: true, home: true, dot: true, star: true, question: true, remove: true } },
+  { nl: 'Labo 3 · boom', en: 'Lab 3 · tree', features: { folders: true, copyMove: true, abs: true, rel: true, home: true, dot: true, star: true, question: true, remove: true } },
+  { nl: 'Labo 3 · opdrachten', en: 'Lab 3 · assignments', features: { folders: false, navigation: true, users: true, groups: true } },
+  { nl: 'Labo 4 · boom', en: 'Lab 4 · tree', features: { folders: true, copyMove: true, abs: true, rel: true, remove: true, chmod: true, chown: true } },
+  { nl: 'Labo 4 · opdrachten', en: 'Lab 4 · assignments', features: { folders: false, rights: true } },
 ];
 let draft2: Options = settings;
 const dlg = $('settings') as HTMLDialogElement;
 
 function renderSettings(): void {
+  const tree = draft2.features.folders;
+  const kinds = $('set-kind');
+  kinds.innerHTML = '';
+  for (const k of ['tree', 'tasks'] as const) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = t(k === 'tree' ? 'kindTree' : 'kindTasks');
+    b.className = (k === 'tree') === tree ? 'on' : '';
+    b.onclick = () => { draft2 = presetOptions(draft2.difficulty, k); renderSettings(); };
+    kinds.appendChild(b);
+  }
+  $('set-kind-hint').textContent = t(tree ? 'setKindTreeHint' : 'setKindTasksHint');
+  $('set-features-hint').textContent = t(tree ? 'setFeaturesHint' : 'setTasksHint');
   const seg = $('set-diff');
   seg.innerHTML = '';
   for (const d of [1, 2, 3] as Difficulty[]) {
@@ -274,7 +299,7 @@ function renderSettings(): void {
     b.type = 'button';
     b.textContent = difficultyName(d) + (d === draft2.difficulty && isCustom(draft2) ? ' *' : '');
     b.className = d === draft2.difficulty ? 'on' : '';
-    b.onclick = () => { draft2 = presetOptions(d); renderSettings(); };
+    b.onclick = () => { draft2 = presetOptions(d, tree ? 'tree' : 'tasks'); renderSettings(); };
     seg.appendChild(b);
   }
   const quick = $('set-quick');
@@ -288,17 +313,20 @@ function renderSettings(): void {
   }
   const box = $('set-features');
   box.innerHTML = '';
+  const tasks = MISSION_KEYS as readonly FeatureKey[];
   for (const k of FEATURE_KEYS) {
+    if (k === 'folders' || tasks.includes(k) === tree) continue;   // only the topics of this kind of exercise
     const [title, sub] = FEATURES[k][getLang()];
     const f = draft2.features;
-    const needsFolders = !['folders', 'navigation', 'users', 'groups'].includes(k);
-    const off = (needsFolders && !f.folders) || (k === 'dot' && !f.copyMove) || (k === 'rmdirOnly' && !f.remove);
+    // the last assignment topic cannot be switched off: that would be no exercise at all
+    const last = !tree && f[k] && tasks.filter(x => f[x]).length === 1;
+    const off = (k === 'dot' && !f.copyMove) || (k === 'rmdirOnly' && !f.remove);
     const label = document.createElement('label');
     label.className = 'feat' + (off ? ' off' : '');
     const cb = document.createElement('input');
     cb.type = 'checkbox';
     cb.checked = draft2.features[k] && !off;
-    cb.disabled = off;
+    cb.disabled = off || last;
     cb.onchange = () => {
       draft2 = { ...draft2, features: normalizeFeatures({ ...draft2.features, [k]: cb.checked }) };
       renderSettings();

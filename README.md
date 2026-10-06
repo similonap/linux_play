@@ -8,6 +8,8 @@ in TypeScript (Vite + xterm.js) en wordt gehost op GitHub Pages; er is geen serv
 - Standaard **Nederlands**, met een NL/EN-knop rechtsboven (`?lang=en` werkt ook).
 - Het lab (`/home/student/work`, `/home/student/stock`) is een virtueel bestandssysteem in het
   geheugen en wordt in `localStorage` bewaard, dus een refresh gaat verder waar je was.
+- Er zijn **twee soorten oefening, nooit gemengd**: een **boom** (bouw `~/work` na) of **opdrachten**
+  (navigeren, gebruikers, groepen, rechten). Je kiest de soort bovenaan in ⚙ Instellingen.
 - **⚙ Instellingen**: kies een moeilijkheid (makkelijk / gemiddeld / moeilijk: de grootte van de
   oefening plus welke onderdelen standaard aan staan) en vink daarna zelf aan wat je wilt oefenen:
   mappenstructuur, navigeren, gebruikers, groepen, kopiëren/verplaatsen, absolute paden,
@@ -16,7 +18,8 @@ in TypeScript (Vite + xterm.js) en wordt gehost op GitHub Pages; er is geen serv
 - `?seed=4242` geeft iedereen dezelfde oefening. `?level=1|2|3` kiest de moeilijkheid en
   `?features=copymove,abs,rel,home,dot,star,question,remove,rmdironly` (komma-gescheiden, enkel
   wat je opsomt staat aan) kiest de onderdelen, bv. een link voor een les over wildcards:
-  `?level=1&features=copymove,star,question`.
+  `?level=1&features=copymove,star,question`. Met enkel opdracht-onderwerpen (`?features=users,groups,rights`) wordt het
+  een opdrachten-oefening.
 
 ## Een oefening
 
@@ -35,8 +38,8 @@ staat moet weg.
 
 ## Labo 3: navigatie, gebruikers en groepen
 
-Naast de mappenstructuur kan een oefening ook **opdrachten** bevatten (vink ze aan in ⚙ Instellingen, of
-kies een snelkeuze "Labo 3"). De machine eromheen is een volledige simulatie met `/etc`, `/var/log`,
+In plaats van een boom kan een oefening uit **opdrachten** bestaan (kies "Opdrachten" in ⚙ Instellingen, of
+een snelkeuze "Labo 3 · opdrachten"). De machine eromheen is een volledige simulatie met `/etc`, `/var/log`,
 `/home/<user>`, gebruikers, groepen en rechten:
 
 | Onderdeel | Commando's |
@@ -53,7 +56,17 @@ kies een snelkeuze "Labo 3"). De machine eromheen is een volledige simulatie met
 - Rechten zijn echt: je kan buiten je eigen home niets maken of verwijderen, en bestanden krijgen de
   gebruiker die ze aanmaakte als eigenaar (`ls -l`).
 - Elke opdracht wordt afgevinkt zodra je ze gedaan hebt (zichtbaar in `task`, `check` en de header).
-  Een oefening zonder mappenstructuur (alleen opdrachten) kan ook.
+
+## Labo 4: rechten en eigenaars
+
+- Commando's: `chmod` (cijfers `640` en letters `u+x,g-w`, `a=r`, `-w`, `-R`), `chown` (`user`, `user:groep`,
+  `user:`, `:groep`, `-R`) en `ll` (= `ls -alF`). Enkel de eigenaar (of root) mag `chmod`; enkel root geeft een
+  bestand aan iemand anders; de eigenaar mag zelf wel een groep kiezen waar hij lid van is.
+- **Rechten / Eigenaar in de structuur** (⚙, soort "Boom"): items in de boom krijgen `● rechten rw-r----- → met cijfers`,
+  `● rechten 750 → met letters` of `♦ eigenaar:groep anna:users` (moeilijk: ook een map `met alles erin` = `chown -R`).
+  `check` kijkt naar de rechten, de eigenaar/groep én met welke notatie de laatste `chmod` gebeurde.
+- **Rechten & eigenaars** (⚙, soort "Opdrachten"): de oefeningen van de slides met `lab4a`, `lab4b`, `lab4c`, `~/linux-labo4`,
+  `oef3` en (moeilijk) de ontbrekende home directory van `user1`. Snelkeuzes "Labo 4 · boom" en "Labo 4 · opdrachten".
 
 ## De regels en hoe ze afgedwongen worden
 
@@ -66,6 +79,7 @@ kies een snelkeuze "Labo 3"). De machine eromheen is een volledige simulatie met
 | WILDCARD-groep: bestanden in `~/stock` die met één patroon (`*` of `?`) verplaatst moeten worden | `cp`/`mv` met de bestandsnaam zelf wordt geweigerd; gelijkaardige bestanden (bv. `les10.txt` naast `les?.txt`) blijven liggen, een te gulzig patroon geeft dus extra bestanden in `check` |
 | ◆ pad "dat met `~` begint" | enkel `~/...` volstaat, `/home/student/...` niet |
 | ★ "gebruik `.` als bestemming" | je moet eerst met `cd` naar de doelmap en dan `cp`/`mv` met `.` als bestemming gebruiken |
+| ● items: rechten met cijfers of met letters | `chmod` met de verkeerde notatie wordt geweigerd; `check` controleert de notatie ook (elke node onthoudt hoe zijn laatste `chmod` gebeurde) |
 | blijf binnen de labmap | elk pad buiten `/home/student` wordt geweigerd; `cd` kan er niet uit |
 
 Een geweigerd commando wordt nooit uitgevoerd; overtredingen worden geteld en getoond door `check`.
@@ -85,7 +99,7 @@ npm run build     # tsc + vite build naar dist/
 |---|---|
 | `src/generator.ts` | willekeurige oefening uit een seed (`LEVELS`, naamlijsten bovenaan) |
 | `src/lab.ts` | regelcontrole (`vet`), meta-commando's, `check`, `hint`, opdracht, tab-aanvulling |
-| `src/commands.ts` | `ls cp mv rm rmdir mkdir touch tree` op het virtuele bestandssysteem (met rechten) |
+| `src/commands.ts` | `ls ll cp mv rm rmdir mkdir touch tree chmod chown` op het virtuele bestandssysteem (met rechten) |
 | `src/admin.ts` | `useradd adduser passwd userdel groupadd groupdel groupmod usermod groups id members whoami apt` |
 | `src/world.ts` | de gesimuleerde machine: gebruikers, groepen, `/etc`, `/var/log`, homes |
 | `src/missions.ts` | de opdrachten (navigatie, gebruikers, groepen) en hun controle |

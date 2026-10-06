@@ -4,16 +4,16 @@
  */
 import { VFS, Who, basename, dirname, isAbs, join, normpath } from './vfs';
 import { Spec, Target, Group, Options, generate, presetOptions, isCustom, normalizeFeatures, Difficulty } from './generator';
-import { COMMANDS, Ctx, isDotName } from './commands';
+import { COMMANDS, Ctx, isDotName, chmodArgs, modeNotation, permString } from './commands';
 import { ADMIN, AdminEnv } from './admin';
 import { System, initialSystem, buildWorld, userBy, groupsOf, isSudoer } from './world';
-import { Entry, isDone, missionText, missionHint } from './missions';
+import { Entry, isDone, missionText, missionHint, setupMissions } from './missions';
 import { expandGlob, tokenize } from './shell';
-import { bold, cyan, dim, green, magenta, red, yellow } from './ansi';
+import { blue, bold, cyan, dim, green, magenta, red, yellow } from './ansi';
 import { tr, difficultyName } from './i18n';
 
 export const ROOT = '/home/student';
-export const FILE_CMDS = ['ls', 'pwd', 'cd', 'cp', 'mv', 'touch', 'mkdir', 'rm', 'rmdir', 'tree'];
+export const FILE_CMDS = ['ls', 'll', 'pwd', 'cd', 'cp', 'mv', 'touch', 'mkdir', 'rm', 'rmdir', 'tree', 'chmod', 'chown'];
 export const USER_CMDS = ['whoami', 'id', 'groups', 'members', 'su', 'sudo', 'passwd', 'useradd', 'adduser', 'userdel',
   'groupadd', 'groupdel', 'groupmod', 'usermod', 'apt'];
 export const ALLOWED = [...FILE_CMDS, ...USER_CMDS];
@@ -144,6 +144,7 @@ export class Lab {
       this.fs.mkdirp(ROOT + '/stock');
       this.materialize();
     }
+    setupMissions(this.spec.missions ?? [], this.sys);
     this.state = { violations: 0, commands: 0, solved: false, started: new Date().toISOString(), done: [] };
     this.cwd = this.prev = ROOT;
     this.onChange();
@@ -221,6 +222,20 @@ export class Lab {
         return block(tr(`'${p}' is part of the lab layout and cannot be removed or moved.`,
           `'${p}' maakt deel uit van de labstructuur en kan niet verwijderd of verplaatst worden.`));
       }
+    }
+
+    if (cmd === 'chmod') {
+      const { flags, mode, files } = chmodArgs(args.map(a => a.value));
+      const how = mode === undefined ? null : modeNotation(mode);
+      if (!how) return ok;     // chmod itself complains
+      for (const f of files) {
+        const full = this.resolve(f);
+        for (const x of [full, ...(flags.has('R') && this.fs.isDir(full) ? this.fs.descendants(full) : [])]) {
+          const want = this.targets[this.rel(x)]?.perm?.how;
+          if (want && want !== how) return violate(this.notationMsg(x, want));
+        }
+      }
+      return ok;
     }
 
     if (cmd === 'mkdir') {
@@ -311,6 +326,14 @@ export class Lab {
       : used.has('abs') ? tr('an absolute path', 'een absoluut pad') : tr('a relative path', 'een relatief pad');
     return tr(`${this.disp(full)} must be handled with ${want} (you used ${got}).`,
       `${this.disp(full)} moet behandeld worden met ${want} (jij gebruikte ${got}).`);
+  }
+
+  private notationMsg(full: string, want: 'num' | 'sym'): string {
+    return want === 'num'
+      ? tr(`the permissions of ${this.disp(full)} must be set with the NUMERIC notation (digits, e.g. chmod 640).`,
+        `de rechten van ${this.disp(full)} moet je instellen met de NUMERIEKE notatie (cijfers, bv. chmod 640).`)
+      : tr(`the permissions of ${this.disp(full)} must be set with the SYMBOLIC notation (letters, e.g. chmod g-w,o+r).`,
+        `de rechten van ${this.disp(full)} moet je instellen met de SYMBOLISCHE notatie (letters, bv. chmod g-w,o+r).`);
   }
 
   private globMsg(full: string): string {
@@ -442,7 +465,7 @@ export class Lab {
     const who = this.whoOf(actor);
     const ctx: Ctx = {
       fs: this.fs, cwd: this.cwd, width: this.width, print: s => this.print(s),
-      can: (path, bit) => this.fs.access(path, who, bit),
+      can: (path, bit) => this.fs.access(path, who, bit), actor, sys: this.sys,
     };
     done(COMMANDS[cmd](ctx, values));
   }
@@ -584,6 +607,7 @@ export class Lab {
       if (!this.confirm(q)) { this.print(tr('cancelled', 'geannuleerd')); return; }
       const seed = cmd === 'reset' ? this.spec.seed : 1 + Math.floor(Math.random() * 99999);
       this.startNew(seed, cmd === 'reset' ? this.spec.options! : this.options);
+      this.buf.push('\x1b[2J\x1b[H');   // a fresh machine: start on an empty screen
       this.showTask();
     }
   }
@@ -615,6 +639,30 @@ export class Lab {
   }
 
   private annotation(n: Target): string {
+    return [this.placement(n), this.rights(n)].filter(Boolean).join('  ');
+  }
+
+  /** What the permissions / owner of an item must become (● chmod, ♦ chown). */
+  private rights(n: Target): string {
+    const out: string[] = [];
+    if (n.perm) {
+      const m = parseInt(n.perm.mode, 8);
+      // numeric: shown as letters, the student works out the digits - and the other way round
+      const shown = n.perm.how === 'num' ? permString(m) : n.perm.how === 'sym' ? n.perm.mode : permString(m);
+      const how = n.perm.how === 'num' ? tr(' → with digits', ' → met cijfers')
+        : n.perm.how === 'sym' ? tr(' → with letters (u/g/o +/-)', ' → met letters (u/g/o +/-)') : '';
+      out.push(green(tr(`● permissions ${shown}${how}`, `● rechten ${shown}${how}`)));
+    }
+    if (n.own) {
+      const { user, group, recursive } = n.own;
+      const who = user && group ? `${user}:${group}` : user ? tr(`owner ${user}`, `eigenaar ${user}`) : tr(`group ${group}`, `groep ${group}`);
+      const label = user && group ? tr(`owner:group ${who}`, `eigenaar:groep ${who}`) : who;
+      out.push(blue(`♦ ${label}` + (recursive ? tr(' (with everything inside)', ' (met alles erin)') : '')));
+    }
+    return out.join('  ');
+  }
+
+  private placement(n: Target): string {
     if (n.mode === 'restricted' && n.glob) {
       return yellow(tr(`★ no mkdir/touch → copy or move it with a WILDCARD from ~/${n.source}`,
         `★ geen mkdir/touch → kopieer of verplaats het met een WILDCARD vanuit ~/${n.source}`));
@@ -748,6 +796,14 @@ export class Lab {
       this.print('  • ' + tr('"use . as destination" means: cd into the target directory, then e.g. mv ~/stock/file . (. is the current directory).',
         '"gebruik . als bestemming" betekent: ga met cd naar de doelmap en doe dan bv. mv ~/stock/bestand . (. is de huidige map).'));
     }
+    if (targets.some(n => n.perm)) {
+      this.print('  • ' + green('●') + tr(' items need exactly these permissions (check with ls -l). "with digits" = numeric notation (chmod 640), "with letters" = symbolic (chmod u+x,g-w).',
+        ' items moeten exact deze rechten krijgen (controleer met ls -l). "met cijfers" = numerieke notatie (chmod 640), "met letters" = symbolisch (chmod u+x,g-w).'));
+    }
+    if (targets.some(n => n.own)) {
+      this.print('  • ' + blue('♦') + tr(' items need this owner and/or group (chown user:group, chown :group). Giving a file to someone else needs sudo - and after that it is no longer yours, so do it last.',
+        ' items moeten deze eigenaar en/of groep krijgen (chown user:groep, chown :groep). Een bestand aan iemand anders geven vraagt sudo - en daarna is het niet meer van jou, doe het dus als laatste.'));
+    }
     if (junk.some(j => j.rmdirOnly)) {
       this.print('  • ' + tr('Directories marked ', 'Mappen met ') + red(tr('rmdir only', 'enkel rmdir')) +
         tr(' may not be removed with rm.', ' mag je niet met rm verwijderen.'));
@@ -807,12 +863,28 @@ export class Lab {
       if (extra.some(e => rel.startsWith(e + '/'))) continue;
       extra.push(rel);
     }
-    return { actual, missing, wrongType, badContent, extra, ok: !(missing.length || wrongType.length || badContent.length || extra.length) };
+    const badPerm: string[] = [], badHow: string[] = [], badOwner: string[] = [];
+    for (const [rel, n] of Object.entries(this.targets)) {
+      if (actual.get(rel) !== n.type) continue;
+      const full = join(ROOT, rel);
+      const node = this.fs.get(full)!;
+      if (n.perm) {
+        if ((node.mode & 0o777) !== parseInt(n.perm.mode, 8)) badPerm.push(rel);
+        else if (n.perm.how && node.how !== n.perm.how) badHow.push(rel);
+      }
+      if (n.own) {
+        const { user, group, recursive } = n.own;
+        const fits = (x: string) => { const m = this.fs.get(x)!; return (!user || m.owner === user) && (!group || m.group === group); };
+        if (![full, ...(recursive ? this.fs.descendants(full) : [])].every(fits)) badOwner.push(rel);
+      }
+    }
+    const ok = !(missing.length || wrongType.length || badContent.length || extra.length || badPerm.length || badHow.length || badOwner.length);
+    return { actual, missing, wrongType, badContent, extra, badPerm, badHow, badOwner, ok };
   }
 
   check(): boolean {
     this.evaluate();
-    const { actual, missing, wrongType, badContent, extra, ok: foldersOk } = this.analyse();
+    const { actual, missing, wrongType, badContent, extra, badPerm, badHow, badOwner, ok: foldersOk } = this.analyse();
     const showFolders = this.spec.options?.features.folders !== false;
     const missions = this.spec.missions ?? [];
     const ok = foldersOk && this.pendingMissions().length === 0;
@@ -844,6 +916,28 @@ export class Lab {
     if (extra.length) {
       this.print(red(tr(`✘ should not be there (${extra.length}):`, `✘ hoort er niet te staan (${extra.length}):`)));
       for (const r of extra) this.print(`    ~/${r}${actual.get(r) === 'dir' ? '/' : ''}`);
+    }
+    if (badPerm.length) {
+      this.print(red(tr(`✘ wrong permissions (${badPerm.length}):`, `✘ verkeerde rechten (${badPerm.length}):`)));
+      for (const r of badPerm) {
+        const m = this.fs.get(join(ROOT, r))!.mode & 0o777;
+        this.print(tr(`    ~/${r}${slash(r)} is ${permString(m)}`, `    ~/${r}${slash(r)} is ${permString(m)}`));
+      }
+    }
+    if (badHow.length) {
+      this.print(red(tr(`✘ right permissions, wrong notation (${badHow.length}):`, `✘ juiste rechten, verkeerde notatie (${badHow.length}):`)));
+      for (const r of badHow) {
+        this.print(this.targets[r].perm!.how === 'num'
+          ? tr(`    ~/${r}${slash(r)} - set it again with digits`, `    ~/${r}${slash(r)} - stel het opnieuw in met cijfers`)
+          : tr(`    ~/${r}${slash(r)} - set it again with letters`, `    ~/${r}${slash(r)} - stel het opnieuw in met letters`));
+      }
+    }
+    if (badOwner.length) {
+      this.print(red(tr(`✘ wrong owner or group (${badOwner.length}):`, `✘ verkeerde eigenaar of groep (${badOwner.length}):`)));
+      for (const r of badOwner) {
+        const m = this.fs.get(join(ROOT, r))!;
+        this.print(`    ~/${r}${slash(r)}  (${m.owner}:${m.group})`);
+      }
     }
     if (missions.length) {
       const doneN = missions.length - this.pendingMissions().length;
@@ -906,6 +1000,22 @@ export class Lab {
       } else {
         this.print(tr(`~/${rel} should not be there (file) - rm it.`, `~/${rel} hoort er niet te staan (bestand) - verwijder het met rm.`));
       }
+      return;
+    }
+    const { badPerm, badHow, badOwner } = this.analyse();
+    const r = badPerm[0] ?? badHow[0];
+    if (r) {
+      const n = this.targets[r];
+      this.print(tr(`~/${r} does not have the right permissions yet. Look at it with ls -l and compare with the task; r = 4, w = 2, x = 1 per group of three (owner, group, others).`,
+        `~/${r} heeft nog niet de juiste rechten. Bekijk het met ls -l en vergelijk met de opgave; r = 4, w = 2, x = 1 per groepje van drie (eigenaar, groep, anderen).`)
+        + (n.perm!.how === 'sym' ? tr(' Use letters: u/g/o with + or -.', ' Gebruik letters: u/g/o met + of -.') : ''));
+      return;
+    }
+    if (badOwner[0]) {
+      const n = this.targets[badOwner[0]].own!;
+      this.print(tr(`~/${badOwner[0]} needs another owner or group (see ♦ in the task) - that is chown.`, `~/${badOwner[0]} moet een andere eigenaar of groep krijgen (zie ♦ in de opgave) - dat doe je met chown.`)
+        + (n.user ? tr(' Only root may give a file to someone else.', ' Enkel root mag een bestand aan iemand anders geven.') : '')
+        + (n.recursive ? tr(' Everything inside must follow: use the recursive option.', ' Alles erin moet mee: gebruik de recursieve optie.') : ''));
       return;
     }
     const next = this.pendingMissions()[0];
