@@ -1,5 +1,6 @@
 import { Rng, hash32, hex8 } from './rng';
 import { dirname, basename } from './vfs';
+import { Mission, makeMissions } from './missions';
 
 export type Mode = 'create' | 'restricted' | 'inherit' | 'exists';
 /** abs: path starts with / or ~ | rel: any other path | home: path starts with ~ | dot: destination is `.` */
@@ -26,6 +27,10 @@ export type Difficulty = 1 | 2 | 3;
 
 /** What an exercise may practise.  mkdir/touch/cd/ls/tree are always part of it. */
 export interface Features {
+  folders: boolean;   // build a folder structure in ~/work (the topics below only apply when this is on)
+  navigation: boolean; // lab 3: ls /etc, cd /var/log, cd -, cd .. ...
+  users: boolean;     // lab 3: useradd, adduser, passwd, su, sudo, whoami, userdel
+  groups: boolean;    // lab 3: groupadd, usermod, groups, members, id, groupmod, groupdel
   copyMove: boolean;  // items that must be brought over with cp/mv (★)
   abs: boolean;       // absolute paths
   rel: boolean;       // relative paths (including ..)
@@ -36,15 +41,15 @@ export interface Features {
   remove: boolean;    // things to delete (rm, rm -r)
   rmdirOnly: boolean; // empty directories that must go with rmdir (needs remove)
 }
-export const FEATURE_KEYS = ['copyMove', 'abs', 'rel', 'home', 'dot', 'star', 'question', 'remove', 'rmdirOnly'] as const;
+export const FEATURE_KEYS = ['folders', 'navigation', 'users', 'groups', 'copyMove', 'abs', 'rel', 'home', 'dot', 'star', 'question', 'remove', 'rmdirOnly'] as const;
 export type FeatureKey = typeof FEATURE_KEYS[number];
 
 /** Difficulty = size of the exercise + which features are switched on by default. */
 export interface Options { difficulty: Difficulty; features: Features }
 
-const ALL_OFF: Features = { copyMove: false, abs: false, rel: false, home: false, dot: false,
+const ALL_OFF: Features = { folders: false, navigation: false, users: false, groups: false, copyMove: false, abs: false, rel: false, home: false, dot: false,
   star: false, question: false, remove: false, rmdirOnly: false };
-const EASY: Features = { ...ALL_OFF, copyMove: true, abs: true, rel: true, remove: true, rmdirOnly: true };
+const EASY: Features = { ...ALL_OFF, folders: true, copyMove: true, abs: true, rel: true, remove: true, rmdirOnly: true };
 export const PRESETS: Record<Difficulty, Features> = {
   1: EASY,
   2: { ...EASY, home: true, star: true },
@@ -54,8 +59,12 @@ export const PRESETS: Record<Difficulty, Features> = {
 export const presetOptions = (difficulty: Difficulty): Options => ({ difficulty, features: { ...PRESETS[difficulty] } });
 
 /** Fix combinations that make no sense (. needs cp/mv, the rmdir rule needs deleting). */
-export function normalizeFeatures(f: Features): Features {
-  const n = { ...ALL_OFF, ...f };
+export function normalizeFeatures(f: Partial<Features>): Features {
+  const n: Features = { ...ALL_OFF, ...f, folders: f.folders ?? true };
+  if (!n.folders) {   // no folder structure: none of its topics can appear
+    for (const k of ['copyMove', 'abs', 'rel', 'home', 'dot', 'star', 'question', 'remove', 'rmdirOnly'] as const) n[k] = false;
+    if (!n.navigation && !n.users && !n.groups) n.folders = true;
+  }
   if (!n.copyMove) n.dot = false;
   if (!n.remove) n.rmdirOnly = false;
   return n;
@@ -71,6 +80,7 @@ export interface Spec {
   targets: Record<string, Target>;
   junk: Record<string, Junk>;
   groups?: Group[];
+  missions?: Mission[];
   options?: Options;  // missing in exercises saved by older versions
   seed: number;
   level: number;      // = options.difficulty
@@ -109,6 +119,10 @@ export function generate(seed: number, options: Options): Spec {
   const rng = new Rng(seed);
   const opts: Options = { difficulty: options.difficulty, features: normalizeFeatures(options.features) };
   const cfg = LEVELS[opts.difficulty];
+  const missions = makeMissions(new Rng(seed ^ 0x2545f491), opts.difficulty, opts.features);
+  if (!opts.features.folders) {
+    return { targets: {}, junk: {}, groups: [], missions, options: opts, seed, level: opts.difficulty, created: new Date().toISOString() };
+  }
   for (let i = 0; i < 1000; i++) {
     const g = tryGenerate(rng, cfg, opts.features);
     if (g) {
@@ -117,7 +131,7 @@ export function generate(seed: number, options: Options): Spec {
       for (const [rel, n] of Object.entries(g.targets)) {
         if (n.type === 'dir' && n.mode === 'restricted') n.token = hex8(hash32(`${seed}:${rel}`));
       }
-      return { ...g, options: opts, seed, level: opts.difficulty, created: new Date().toISOString() };
+      return { ...g, missions, options: opts, seed, level: opts.difficulty, created: new Date().toISOString() };
     }
   }
   throw new Error('could not generate an exercise');

@@ -14,9 +14,10 @@ const I18N: Record<Lang, Record<string, string>> = {
     setTitle: 'Instellingen', setDifficulty: 'Moeilijkheid', setFeatures: 'Wat wil je oefenen?',
     setDiffHint: 'De moeilijkheid bepaalt de grootte van de oefening en welke onderdelen standaard aan staan.',
     setFeaturesHint: 'Aanmaken (mkdir, touch) en navigeren (cd, ls, tree) zit er altijd in.',
+    setQuick: 'Snelkeuze', missions: 'opdrachten',
     setCancel: 'Annuleer', setStart: 'Start nieuwe oefening', custom: 'aangepast',
     setConfirm: 'Je huidige oefening wordt vervangen. Doorgaan?',
-    footCmds: "Commando's: ls pwd cd cp mv touch mkdir rm rmdir tree",
+    footCmds: "Commando's: typ help voor de volledige lijst (ls, cd, cp, mv, sudo, useradd, id, ...)",
     footLab: 'Lab: task · check · hint · help · reset · new',
     footSaved: 'voortgang wordt in deze browser bewaard',
     exercise: 'oefening', level: 'niveau', commands: "commando's", violations: 'overtredingen',
@@ -29,9 +30,10 @@ const I18N: Record<Lang, Record<string, string>> = {
     setTitle: 'Settings', setDifficulty: 'Difficulty', setFeatures: 'What do you want to practise?',
     setDiffHint: 'Difficulty sets the size of the exercise and which topics are on by default.',
     setFeaturesHint: 'Creating (mkdir, touch) and navigating (cd, ls, tree) are always included.',
+    setQuick: 'Quick pick', missions: 'assignments',
     setCancel: 'Cancel', setStart: 'Start new exercise', custom: 'customised',
     setConfirm: 'Your current exercise will be replaced. Continue?',
-    footCmds: 'Commands: ls pwd cd cp mv touch mkdir rm rmdir tree',
+    footCmds: 'Commands: type help for the full list (ls, cd, cp, mv, sudo, useradd, id, ...)',
     footLab: 'Lab: task · check · hint · help · reset · new',
     footSaved: 'progress is saved in this browser',
     exercise: 'exercise', level: 'level', commands: 'commands', violations: 'violations',
@@ -110,6 +112,9 @@ function renderInfo(): void {
   $('cmds').innerHTML = `${t('commands')} <b>${s.commands}</b>`;
   $('viol').innerHTML = `${t('violations')} <b>${s.violations}</b>`;
   $('viol').className = 'chip' + (s.violations ? ' bad' : '');
+  $('miss').hidden = s.missionsTotal === 0;
+  $('miss').innerHTML = `${t('missions')} <b>${s.missionsDone}/${s.missionsTotal}</b>`;
+  $('miss').className = 'chip' + (s.missionsTotal > 0 && s.missionsDone === s.missionsTotal ? ' ok' : '');
   $('status').textContent = s.solved ? t('solved') : t('unsolved');
   $('status').className = 'chip' + (s.solved ? ' ok' : '');
 }
@@ -124,12 +129,13 @@ function applyLang(): void {
 
 // ---- prompt + line editor ----------------------------------------------------------
 function paintPrompt(): string {
-  const m = prompt.match(/^(.*?)(:)(.*)(\$ )$/);
-  return m ? `\x1b[1;32m${m[1]}\x1b[0m:\x1b[1;34m${m[3]}\x1b[0m$ ` : prompt;
+  const m = prompt.match(/^(.*?)(:)(.*)([$#] )$/);
+  return m ? `\x1b[1;32m${m[1]}\x1b[0m:\x1b[1;34m${m[3]}\x1b[0m${m[4]}` : prompt;
 }
 function redraw(): void {
-  term.write('\r\x1b[2K' + paintPrompt() + buf + '\r');
-  const col = prompt.length + cur;
+  const secret = session.isSecret();      // passwords are not echoed
+  term.write('\r\x1b[2K' + paintPrompt() + (secret ? '' : buf) + '\r');
+  const col = prompt.length + (secret ? 0 : cur);
   if (col > 0) term.write(`\x1b[${col}C`);
 }
 function newPrompt(): void { prompt = session.prompt(); buf = ''; cur = 0; redraw(); }
@@ -140,10 +146,10 @@ function saveHistory(): void {
 
 function submit(line: string): void {
   term.write('\r\n');
-  const l = line.trim();
-  if (l) {
-    if (history[history.length - 1] !== l) history.push(l);
-    saveHistory();
+  const asking = session.isAsking();
+  const l = asking ? line : line.trim();
+  if (l || asking) {
+    if (!asking && history[history.length - 1] !== l) { history.push(l); saveHistory(); }
     const out = session.run(l);
     if (l === 'clear') term.clear();
     term.write(out);
@@ -154,6 +160,7 @@ function submit(line: string): void {
 }
 
 function complete(): void {
+  if (session.isAsking()) return;
   const line = buf.slice(0, cur);
   const c = session.complete(line);
   if (!c.length) return;
@@ -174,6 +181,14 @@ const SEQS: Record<string, string> = {
   '\x1b[H': 'home', '\x1b[F': 'end', '\x1b[3~': 'del', '\x1bOH': 'home', '\x1bOF': 'end',
 };
 
+function historyStep(k: string): void {
+  if (k === 'up') {
+    if (hIdx > 0) { if (hIdx === history.length) draft = buf; hIdx--; buf = history[hIdx]; cur = buf.length; redraw(); }
+  } else if (hIdx < history.length) {
+    hIdx++; buf = hIdx === history.length ? draft : history[hIdx]; cur = buf.length; redraw();
+  }
+}
+
 function onKey(d: string): void {
   if (busy) return;
   const items: string[] = [];
@@ -191,13 +206,12 @@ function onKey(d: string): void {
     else if (k === 'right') { if (cur < buf.length) { cur++; redraw(); } }
     else if (k === 'home' || k === '\x01') { cur = 0; redraw(); }
     else if (k === 'end' || k === '\x05') { cur = buf.length; redraw(); }
-    else if (k === 'up') {
-      if (hIdx > 0) { if (hIdx === history.length) draft = buf; hIdx--; buf = history[hIdx]; cur = buf.length; redraw(); }
-    } else if (k === 'down') {
-      if (hIdx < history.length) { hIdx++; buf = hIdx === history.length ? draft : history[hIdx]; cur = buf.length; redraw(); }
-    } else if (k === '\x15') { buf = buf.slice(cur); cur = 0; redraw(); }
+    else if (k === 'up' || k === 'down') {
+      if (!session.isAsking()) historyStep(k);
+    }
+    else if (k === '\x15') { buf = buf.slice(cur); cur = 0; redraw(); }
     else if (k === '\x0b') { buf = buf.slice(0, cur); redraw(); }
-    else if (k === '\x03') { term.write('^C\r\n'); newPrompt(); }
+    else if (k === '\x03') { term.write('^C\r\n'); session.interrupt(); newPrompt(); }
     else if (k === '\x0c') { term.clear(); newPrompt(); }
     else if (k === '\t') complete();
     else if (k >= ' ' && k !== '\x7f') { buf = buf.slice(0, cur) + k + buf.slice(cur); cur++; redraw(); }
@@ -230,6 +244,10 @@ document.querySelectorAll<HTMLElement>('.lang button').forEach(b => b.addEventLi
 
 // ---- settings dialog ----------------------------------------------------------------
 const FEATURES: Record<FeatureKey, { nl: [string, string]; en: [string, string] }> = {
+  folders: { nl: ['Mappenstructuur bouwen', 'een structuur in ~/work maken en opruimen (de onderdelen hieronder horen hierbij)'], en: ['Build a folder structure', 'make and tidy a structure in ~/work (the topics below belong to this)'] },
+  navigation: { nl: ['Navigeren door het systeem', 'ls /etc, cd /var/log, cd -, cd .. (labo 3)'], en: ['Navigating the system', 'ls /etc, cd /var/log, cd -, cd .. (lab 3)'] },
+  users: { nl: ['Gebruikers', 'useradd, adduser, passwd, userdel, su, sudo, whoami (labo 3)'], en: ['Users', 'useradd, adduser, passwd, userdel, su, sudo, whoami (lab 3)'] },
+  groups: { nl: ['Groepen', 'groupadd, groupdel, groupmod, usermod, groups, members, id (labo 3)'], en: ['Groups', 'groupadd, groupdel, groupmod, usermod, groups, members, id (lab 3)'] },
   copyMove: { nl: ['Kopiëren en verplaatsen', 'cp en mv i.p.v. mkdir/touch (★)'], en: ['Copying and moving', 'cp and mv instead of mkdir/touch (★)'] },
   abs: { nl: ['Absolute paden', 'beginnen met /'], en: ['Absolute paths', 'start with /'] },
   rel: { nl: ['Relatieve paden', 'vanaf de huidige map, ook met ..'], en: ['Relative paths', 'from the current directory, also with ..'] },
@@ -240,6 +258,11 @@ const FEATURES: Record<FeatureKey, { nl: [string, string]; en: [string, string] 
   remove: { nl: ['Verwijderen', 'rm en rm -r'], en: ['Deleting', 'rm and rm -r'] },
   rmdirOnly: { nl: ['Lege mappen enkel met rmdir', 'rm mag dan niet (vraagt verwijderen)'], en: ['Empty directories only with rmdir', 'rm is not allowed then (needs deleting)'] },
 };
+const QUICK: { nl: string; en: string; features: Partial<Features> }[] = [
+  { nl: 'Labo 3 · bestanden', en: 'Lab 3 · files', features: { folders: true, navigation: true, copyMove: true, abs: true, rel: true, home: true, dot: true, star: true, question: true, remove: true } },
+  { nl: 'Labo 3 · users & groups', en: 'Lab 3 · users & groups', features: { folders: false, users: true, groups: true } },
+  { nl: 'Labo 3 · alles', en: 'Lab 3 · everything', features: { folders: true, navigation: true, users: true, groups: true, copyMove: true, abs: true, rel: true, home: true, dot: true, star: true, question: true, remove: true } },
+];
 let draft2: Options = settings;
 const dlg = $('settings') as HTMLDialogElement;
 
@@ -254,11 +277,22 @@ function renderSettings(): void {
     b.onclick = () => { draft2 = presetOptions(d); renderSettings(); };
     seg.appendChild(b);
   }
+  const quick = $('set-quick');
+  quick.innerHTML = '';
+  for (const q of QUICK) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = q[getLang()];
+    b.onclick = () => { draft2 = { ...draft2, features: normalizeFeatures(q.features) }; renderSettings(); };
+    quick.appendChild(b);
+  }
   const box = $('set-features');
   box.innerHTML = '';
   for (const k of FEATURE_KEYS) {
     const [title, sub] = FEATURES[k][getLang()];
-    const off = (k === 'dot' && !draft2.features.copyMove) || (k === 'rmdirOnly' && !draft2.features.remove);
+    const f = draft2.features;
+    const needsFolders = !['folders', 'navigation', 'users', 'groups'].includes(k);
+    const off = (needsFolders && !f.folders) || (k === 'dot' && !f.copyMove) || (k === 'rmdirOnly' && !f.remove);
     const label = document.createElement('label');
     label.className = 'feat' + (off ? ' off' : '');
     const cb = document.createElement('input');

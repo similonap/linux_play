@@ -1,10 +1,14 @@
 /** A tiny in-memory POSIX-like file system (directories and files only). */
 
-export interface VFile { type: 'file'; content: string; mtime: number }
-export interface VDir { type: 'dir'; children: Map<string, VNode>; mtime: number }
+interface Meta { owner: string; group: string; mode: number }
+export interface VFile extends Meta { type: 'file'; content: string; mtime: number }
+export interface VDir extends Meta { type: 'dir'; children: Map<string, VNode>; mtime: number }
 export type VNode = VFile | VDir;
 
-export type FsCode = 'ENOENT' | 'EEXIST' | 'ENOTDIR' | 'EISDIR' | 'ENOTEMPTY';
+/** Who is acting: used for ownership of new nodes and for permission checks. */
+export interface Who { user: string; groups: string[] }
+
+export type FsCode = 'ENOENT' | 'EEXIST' | 'ENOTDIR' | 'EISDIR' | 'ENOTEMPTY' | 'EACCES';
 
 export class FsError extends Error {
   constructor(public code: FsCode) { super(code); }
@@ -12,7 +16,7 @@ export class FsError extends Error {
   get reason(): string {
     return {
       ENOENT: 'No such file or directory', EEXIST: 'File exists', ENOTDIR: 'Not a directory',
-      EISDIR: 'Is a directory', ENOTEMPTY: 'Directory not empty',
+      EISDIR: 'Is a directory', ENOTEMPTY: 'Directory not empty', EACCES: 'Permission denied',
     }[this.code];
   }
 }
@@ -41,8 +45,13 @@ export const dirname = (p: string) => {
 };
 export const basename = (p: string) => p.slice(p.lastIndexOf('/') + 1);
 
+const mkDir = (actor: Who & { group: string }): VDir =>
+  ({ type: 'dir', children: new Map(), mtime: Date.now(), owner: actor.user, group: actor.group, mode: 0o755 });
+
 export class VFS {
-  root: VDir = { type: 'dir', children: new Map(), mtime: Date.now() };
+  /** Whoever creates nodes (set by the lab before each command). */
+  actor: Who & { group: string } = { user: 'root', groups: ['root'], group: 'root' };
+  root: VDir = mkDir({ user: 'root', groups: [], group: 'root' });
 
   private parts(path: string): string[] {
     return normpath(path).split('/').filter(Boolean);
@@ -74,8 +83,31 @@ export class VFS {
     const parent = this.parentDir(path);
     const name = basename(normpath(path));
     if (parent.children.has(name)) throw new FsError('EEXIST');
-    parent.children.set(name, { type: 'dir', children: new Map(), mtime: Date.now() });
+    parent.children.set(name, mkDir(this.actor));
     parent.mtime = Date.now();
+  }
+
+  /** Can `who` read (r), write (w) or enter/execute (x) this path?  Every parent directory needs x. */
+  access(path: string, who: Who, bit: 'r' | 'w' | 'x'): boolean {
+    if (who.user === 'root') return this.exists(path);
+    const parts = this.parts(path);
+    let n: VNode = this.root;
+    const check = (node: VNode, b: 'r' | 'w' | 'x'): boolean => {
+      const shift = node.owner === who.user ? 6 : who.groups.includes(node.group) ? 3 : 0;
+      return (node.mode & ({ r: 4, w: 2, x: 1 }[b] << shift)) !== 0;
+    };
+    for (const p of parts) {
+      if (n.type !== 'dir' || !check(n, 'x')) return false;
+      const c = n.children.get(p);
+      if (!c) return false;
+      n = c;
+    }
+    return check(n, bit);
+  }
+
+  setMeta(path: string, meta: Partial<Meta>): void {
+    const n = this.get(path);
+    if (n) Object.assign(n, meta);
   }
 
   mkdirp(path: string): void {
@@ -93,7 +125,7 @@ export class VFS {
     const name = basename(normpath(path));
     const ex = parent.children.get(name);
     if (ex?.type === 'dir') throw new FsError('EISDIR');
-    parent.children.set(name, { type: 'file', content, mtime: Date.now() });
+    parent.children.set(name, { type: 'file', content, mtime: Date.now(), owner: this.actor.user, group: this.actor.group, mode: 0o644 });
     parent.mtime = Date.now();
   }
 
@@ -139,7 +171,7 @@ export class VFS {
     parent.mtime = Date.now();
   }
 
-  /** Deep copy; an existing destination directory is merged into, files are overwritten. */
+  /** Deep copy (owned by the actor); an existing destination directory is merged into, files are overwritten. */
   copy(src: string, dst: string): void {
     const n = this.get(src);
     if (!n) throw new FsError('ENOENT');
@@ -150,7 +182,7 @@ export class VFS {
       for (const [k] of n.children) this.copy(src + '/' + k, dst + '/' + k);
       return;
     }
-    parent.children.set(name, clone(n));
+    parent.children.set(name, clone(n, this.actor));
     parent.mtime = Date.now();
   }
 
@@ -188,26 +220,28 @@ export class VFS {
   }
 }
 
-function clone(n: VNode): VNode {
-  if (n.type === 'file') return { ...n };
-  const d: VDir = { type: 'dir', children: new Map(), mtime: n.mtime };
-  for (const [k, c] of n.children) d.children.set(k, clone(c));
+function clone(n: VNode, owner: { user: string; group: string }): VNode {
+  if (n.type === 'file') return { ...n, owner: owner.user, group: owner.group };
+  const d: VDir = { type: 'dir', children: new Map(), mtime: n.mtime, owner: owner.user, group: owner.group, mode: n.mode };
+  for (const [k, c] of n.children) d.children.set(k, clone(c, owner));
   return d;
 }
 
-interface Dumped { t: 'd' | 'f'; m: number; s?: string; c?: Record<string, Dumped> }
+interface Dumped { t: 'd' | 'f'; m: number; o: string; g: string; p: number; s?: string; c?: Record<string, Dumped> }
 
 function dump(n: VNode): Dumped {
-  if (n.type === 'file') return { t: 'f', m: n.mtime, s: n.content };
+  const meta = { m: n.mtime, o: n.owner, g: n.group, p: n.mode };
+  if (n.type === 'file') return { t: 'f', ...meta, s: n.content };
   const c: Record<string, Dumped> = {};
   for (const [k, v] of n.children) c[k] = dump(v);
-  return { t: 'd', m: n.mtime, c };
+  return { t: 'd', ...meta, c };
 }
 
 function load(d: unknown): VNode {
   const x = d as Dumped;
-  if (x.t === 'f') return { type: 'file', content: String(x.s ?? ''), mtime: x.m };
-  const dir: VDir = { type: 'dir', children: new Map(), mtime: x.m };
+  const meta = { owner: x.o ?? 'root', group: x.g ?? 'root', mode: x.p ?? (x.t === 'd' ? 0o755 : 0o644) };
+  if (x.t === 'f') return { type: 'file', content: String(x.s ?? ''), mtime: x.m, ...meta };
+  const dir: VDir = { type: 'dir', children: new Map(), mtime: x.m, ...meta };
   for (const [k, v] of Object.entries(x.c ?? {})) dir.children.set(k, load(v));
   return dir;
 }

@@ -11,6 +11,13 @@ export interface Ctx {
   cwd: string;
   width: number;
   print: (s?: string) => void;
+  /** may the current user read (r) / write (w) / enter (x) this path? */
+  can: (path: string, bit: 'r' | 'w' | 'x') => boolean;
+}
+
+/** Throws EACCES unless the user may add or remove entries in this directory. */
+function needWrite(c: Ctx, dir: string): void {
+  if (!c.can(dir, 'w')) throw new FsError('EACCES');
 }
 
 const resolve = (cwd: string, p: string) => normpath(isAbs(p) ? p : join(cwd, p));
@@ -58,6 +65,9 @@ function mkdir(c: Ctx, args: string[]): number {
   for (const p of ops) {
     const full = resolve(c.cwd, p);
     try {
+      let top = dirname(full);
+      while (!c.fs.exists(top) && has(flags, 'p', 'parents')) top = dirname(top);
+      if (c.fs.isDir(top)) needWrite(c, top);
       if (has(flags, 'p', 'parents')) {
         const missing: string[] = [];
         for (let a = full; !c.fs.exists(a); a = dirname(a)) missing.push(a);
@@ -84,8 +94,13 @@ function touch(c: Ctx, args: string[]): number {
   for (const p of ops) {
     const full = resolve(c.cwd, p);
     try {
-      if (c.fs.exists(full)) c.fs.touch(full);
-      else if (!has(flags, 'c', 'no-create')) c.fs.touch(full);
+      if (c.fs.exists(full)) {
+        if (!c.can(full, 'w')) throw new FsError('EACCES');
+        c.fs.touch(full);
+      } else if (!has(flags, 'c', 'no-create')) {
+        if (c.fs.isDir(dirname(full))) needWrite(c, dirname(full));
+        c.fs.touch(full);
+      }
     } catch (e) { rc = fail(c, `touch: cannot touch '${p}': ${why(e)}`); }
   }
   return rc;
@@ -107,6 +122,7 @@ function rm(c: Ctx, args: string[]): number {
       continue;
     }
     try {
+      for (const x of [full, ...(rec && c.fs.isDir(full) ? c.fs.descendants(full) : [])]) needWrite(c, dirname(x));
       if (c.fs.isDir(full)) {
         if (rec) c.fs.rmtree(full);
         else if (has(flags, 'd', 'dir')) c.fs.rmdir(full);
@@ -127,6 +143,7 @@ function rmdir(c: Ctx, args: string[]): number {
   for (const p of ops) {
     const full = resolve(c.cwd, p);
     try {
+      if (c.fs.exists(full)) needWrite(c, dirname(full));
       c.fs.rmdir(full);
       if (has(flags, 'v', 'verbose')) c.print(`rmdir: removing directory, '${p}'`);
       if (has(flags, 'p', 'parents')) {
@@ -186,7 +203,10 @@ function cp(c: Ctx, args: string[]): number {
     }
     if (sfull === final) { rc = fail(c, `cp: '${s}' and '${s}' are the same file`); continue; }
     if (c.fs.exists(final) && has(flags, 'n', 'no-clobber')) continue;
+    if (!c.can(sfull, 'r')) { rc = fail(c, `cp: cannot open '${s}' for reading: Permission denied`); continue; }
     try {
+      if (c.fs.exists(final) && !c.fs.isDir(final)) { if (!c.can(final, 'w')) throw new FsError('EACCES'); }
+      else if (!(c.fs.isDir(final) && c.fs.isDir(sfull))) needWrite(c, dirname(final));
       c.fs.copy(sfull, final);
       if (has(flags, 'v', 'verbose')) c.print(`'${s}' -> '${relpath(final, c.cwd)}'`);
     } catch (e) { rc = fail(c, `cp: cannot create regular file '${relpath(final, c.cwd)}': ${why(e)}`); }
@@ -214,6 +234,8 @@ function mv(c: Ctx, args: string[]): number {
     }
     if (c.fs.exists(final) && has(flags, 'n', 'no-clobber')) continue;
     try {
+      needWrite(c, dirname(sfull));
+      needWrite(c, dirname(final));
       if (c.fs.isDir(final) && c.fs.isDir(sfull)) {
         if (c.fs.list(final).length) { rc = fail(c, `mv: cannot overwrite '${relpath(final, c.cwd)}': Directory not empty`); continue; }
         c.fs.rmdir(final);
@@ -238,6 +260,15 @@ function human(n: number): string {
   return `${Math.floor(n)}T`;
 }
 
+/** e.g. drwxr-xr-x, with the sticky bit shown as a t (like /tmp). */
+function modeString(n: VNode): string {
+  const bits = 'rwxrwxrwx';
+  let out = n.type === 'dir' ? 'd' : '-';
+  for (let i = 0; i < 9; i++) out += n.mode & (1 << (8 - i)) ? bits[i] : '-';
+  if (n.mode & 0o1000) out = out.slice(0, 9) + (out[9] === 'x' ? 't' : 'T');
+  return out;
+}
+
 const sizeOf = (n: VNode) => (n.type === 'dir' ? 4096 : enc.encode(n.content).length);
 
 function decorate(name: string, node: VNode, flags: Set<string>): string {
@@ -258,7 +289,7 @@ function longLine(name: string, node: VNode, flags: Set<string>): string[] {
     : `${MONTHS[d.getMonth()]} ${day} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   const size = has(flags, 'h') ? human(sizeOf(node)) : String(sizeOf(node));
   const nlink = node.type === 'dir' ? 2 + [...node.children.values()].filter(x => x.type === 'dir').length : 1;
-  return [node.type === 'dir' ? 'drwxr-xr-x' : '-rw-r--r--', String(nlink), 'student', 'student', size, stamp,
+  return [modeString(node), String(nlink), node.owner, node.group, size, stamp,
     decorate(name, node, flags)];
 }
 
@@ -333,6 +364,7 @@ function ls(c: Ctx, args: string[]): number {
     if (!first) c.print();
     first = false;
     if (heading) c.print(label + ':');
+    if (!c.can(full, 'r')) { c.print(`ls: cannot open directory '${label}': Permission denied`); rc = 2; return; }
     let names = c.fs.list(full);
     if (has(flags, 'a')) names = [...names, '.', '..'];
     else if (!has(flags, 'A')) names = names.filter(n => !n.startsWith('.'));
@@ -373,6 +405,7 @@ function tree(c: Ctx, args: string[]): number {
 
   const walk = (d: string, prefix: string, depth: number) => {
     if (maxDepth !== null && depth > maxDepth) return;
+    if (!c.can(d, 'r')) return;
     let entries = c.fs.list(d).sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0));
     if (!showAll) entries = entries.filter(e => !e.startsWith('.'));
     if (dirsOnly) entries = entries.filter(e => c.fs.isDir(join(d, e)));
@@ -387,7 +420,7 @@ function tree(c: Ctx, args: string[]): number {
 
   for (const p of paths.length ? paths : ['.']) {
     const full = resolve(c.cwd, p);
-    if (!c.fs.isDir(full)) { c.print(`${p}  [error opening dir]`); continue; }
+    if (!c.fs.isDir(full) || !c.can(full, 'r')) { c.print(`${p}  [error opening dir]`); continue; }
     c.print(blue(p));
     walk(full, '', 1);
   }

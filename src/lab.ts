@@ -2,15 +2,21 @@
  * The lab: exercise state, rule checking (vet), meta commands, check and hint.
  * All text shown to the student goes through tr(english, dutch).
  */
-import { VFS, basename, dirname, isAbs, join, normpath } from './vfs';
-import { Spec, Target, Group, Options, generate, presetOptions, isCustom, Difficulty } from './generator';
+import { VFS, Who, basename, dirname, isAbs, join, normpath } from './vfs';
+import { Spec, Target, Group, Options, generate, presetOptions, isCustom, normalizeFeatures, Difficulty } from './generator';
 import { COMMANDS, Ctx, isDotName } from './commands';
+import { ADMIN, AdminEnv } from './admin';
+import { System, initialSystem, buildWorld, userBy, groupsOf, isSudoer } from './world';
+import { Entry, isDone, missionText, missionHint } from './missions';
 import { expandGlob, tokenize } from './shell';
 import { bold, cyan, dim, green, magenta, red, yellow } from './ansi';
 import { tr, difficultyName } from './i18n';
 
 export const ROOT = '/home/student';
-export const ALLOWED = ['ls', 'pwd', 'cd', 'cp', 'mv', 'touch', 'mkdir', 'rm', 'rmdir', 'tree'];
+export const FILE_CMDS = ['ls', 'pwd', 'cd', 'cp', 'mv', 'touch', 'mkdir', 'rm', 'rmdir', 'tree'];
+export const USER_CMDS = ['whoami', 'id', 'groups', 'members', 'su', 'sudo', 'passwd', 'useradd', 'adduser', 'userdel',
+  'groupadd', 'groupdel', 'groupmod', 'usermod', 'apt'];
+export const ALLOWED = [...FILE_CMDS, ...USER_CMDS];
 export const META = ['task', 'check', 'hint', 'help', 'reset', 'new', 'clear', 'exit', 'quit'];
 const SHELL_CHARS = '|;&<>`$';
 export const MARKER = '.labid'; // hidden id file inside directories that must be copied/moved
@@ -21,7 +27,20 @@ export interface State {
   solved: boolean;
   started: string;
   solvedAt?: string;
+  /** ids of the missions that have been completed (latched) */
+  done: string[];
 }
+
+/** Everything about "who is logged in" that has to survive a reload. */
+export interface WorldState {
+  sys: System;
+  who: string;
+  stack: { user: string; cwd: string; prev: string }[];
+  sudo: { user: string; until: number } | null;
+  entries: Entry[];
+}
+
+interface Pending { prompt: string; secret: boolean; cb: (answer: string) => void }
 
 interface Vet { ok: boolean; msg: string | null; violation: boolean }
 
@@ -65,6 +84,14 @@ export class Lab {
   cwd = ROOT;
   prev = ROOT;
   width = 80;
+  sys: System = initialSystem();
+  /** the user whose shell this is right now (changes with su / sudo -i / exit) */
+  who = 'student';
+  /** the logins we came from, so `exit` can go back */
+  stack: WorldState['stack'] = [];
+  private sudoCache: WorldState['sudo'] = null;
+  entries: Entry[] = [];
+  pending: Pending | null = null;
   /** Asks a yes/no question (window.confirm in the browser). */
   confirm: (q: string) => boolean = () => true;
   /** Called after every command / new exercise so the owner can persist. */
@@ -78,12 +105,25 @@ export class Lab {
   get targets() { return this.spec.targets; }
   get junk() { return this.spec.junk; }
 
-  restore(spec: Spec, state: State, fsData: unknown): void {
+  restore(spec: Spec, state: State, fsData: unknown, world: WorldState): void {
     this.spec = spec;
-    if (!spec.options) spec.options = presetOptions((spec.level as Difficulty) ?? 2); // saved by an older version
-    this.state = state;
+    spec.options = spec.options
+      ? { difficulty: spec.options.difficulty, features: normalizeFeatures(spec.options.features) }
+      : presetOptions((spec.level as Difficulty) ?? 2);
+    this.state = { ...state, done: state.done ?? [] };
     this.fs = VFS.fromJSON(fsData);
-    this.cwd = this.prev = ROOT;
+    this.sys = world.sys;
+    this.who = world.who;
+    this.stack = world.stack;
+    this.sudoCache = world.sudo;
+    this.entries = world.entries;
+    this.cwd = this.prev = userBy(this.sys, this.who)?.home ?? ROOT;
+    if (!this.fs.isDir(this.cwd)) this.cwd = this.prev = '/';
+    this.pending = null;
+  }
+
+  worldState(): WorldState {
+    return { sys: this.sys, who: this.who, stack: this.stack, sudo: this.sudoCache, entries: this.entries.slice(-200) };
   }
 
   /** Settings used for the next `new` exercise (the Session keeps this in sync with the UI). */
@@ -91,11 +131,20 @@ export class Lab {
 
   startNew(seed: number, options: Options): void {
     this.spec = generate(seed, options);
-    this.fs = new VFS();
-    this.fs.mkdirp(ROOT + '/work');
-    this.fs.mkdirp(ROOT + '/stock');
-    this.materialize();
-    this.state = { violations: 0, commands: 0, solved: false, started: new Date().toISOString() };
+    this.sys = initialSystem();
+    this.fs = buildWorld(this.sys);
+    this.who = 'student';
+    this.stack = [];
+    this.sudoCache = null;
+    this.entries = [];
+    this.pending = null;
+    this.useActor('student');
+    if (options.features.folders) {
+      this.fs.mkdirp(ROOT + '/work');
+      this.fs.mkdirp(ROOT + '/stock');
+      this.materialize();
+    }
+    this.state = { violations: 0, commands: 0, solved: false, started: new Date().toISOString(), done: [] };
     this.cwd = this.prev = ROOT;
     this.onChange();
   }
@@ -124,16 +173,36 @@ export class Lab {
   }
 
   // ---- paths -----------------------------------------------------------------
+  get home(): string { return userBy(this.sys, this.who)?.home ?? ROOT; }
+
+  /** ~ is the home of whoever is logged in; ~name is the home of that user. */
   expandTilde(tok: string): string {
-    if (tok === '~') return ROOT;
-    if (tok.startsWith('~/')) return ROOT + tok.slice(1);
-    return tok;
+    if (tok === '~') return this.home;
+    if (tok.startsWith('~/')) return this.home + tok.slice(1);
+    const m = /^~([a-z_][a-z0-9_-]*)(\/.*)?$/.exec(tok);
+    const u = m && userBy(this.sys, m[1]);
+    return u ? u.home + (m![2] ?? '') : tok;
   }
   resolve(arg: string): string { return normpath(isAbs(arg) ? arg : join(this.cwd, arg)); }
-  inside(full: string): boolean { return full === ROOT || full.startsWith(ROOT + '/'); }
   rel(full: string): string { return full === ROOT ? '' : full.startsWith(ROOT + '/') ? full.slice(ROOT.length + 1) : full; }
   disp(full: string): string { const r = this.rel(full); return r === '' ? '~' : '~/' + r; }
-  prompt(): string { return `student@lab:${this.disp(this.cwd)}$ `; }
+  prompt(): string {
+    if (this.pending) return this.pending.prompt;
+    const h = this.home;
+    const where = this.cwd === h ? '~' : this.cwd.startsWith(h + '/') ? '~' + this.cwd.slice(h.length) : this.cwd;
+    return `${this.who}@lab:${where}${this.who === 'root' ? '#' : '$'} `;
+  }
+
+  // ---- who is acting -----------------------------------------------------------
+  private whoOf(user: string): Who {
+    return { user, groups: groupsOf(this.sys, user).map(g => g.name) };
+  }
+
+  /** Make new files belong to `user` and let permission checks use their groups. */
+  private useActor(user: string): void {
+    const w = this.whoOf(user);
+    this.fs.actor = { ...w, group: w.groups[0] ?? user };
+  }
 
   // ---- rule checking ---------------------------------------------------------
   vet(cmd: string, args: Arg[]): Vet {
@@ -142,15 +211,11 @@ export class Lab {
     const violate = (msg: string): Vet => ({ ok: false, msg, violation: true });
     const { opts, pa } = splitOpts(args);
     const paths = pa.map(a => a.value);
-    const protectedPaths = new Set([ROOT, ROOT + '/work', ROOT + '/stock']);
+    const protectedPaths = new Set(['/', '/home', ROOT, ROOT + '/work', ROOT + '/stock']);
 
     for (let i = 0; i < paths.length; i++) {
       const p = paths[i];
       const full = this.resolve(p);
-      if (!this.inside(full)) {
-        return block(tr(`'${p}' is outside the lab. Everything happens inside ${ROOT}.`,
-          `'${p}' ligt buiten het lab. Alles gebeurt binnen ${ROOT}.`));
-      }
       const isDest = (cmd === 'cp' || cmd === 'mv') && i === paths.length - 1;
       if ((cmd === 'rm' || cmd === 'rmdir' || cmd === 'mv') && protectedPaths.has(full) && !isDest) {
         return block(tr(`'${p}' is part of the lab layout and cannot be removed or moved.`,
@@ -165,7 +230,7 @@ export class Lab {
         const created = [full];
         if (parents) {
           let d = dirname(full);
-          while (this.inside(d) && !this.fs.exists(d)) { created.push(d); d = dirname(d); }
+          while (d !== '/' && !this.fs.exists(d)) { created.push(d); d = dirname(d); }
         }
         for (const cr of created) {
           const v = this.checkCreation(cr, usedStyles(a), 'mkdir');
@@ -276,16 +341,41 @@ export class Lab {
   }
 
   // ---- command execution -----------------------------------------------------
-  /** Run one command line; returns the terminal output (with \r\n line endings). */
+  /** Run one command line (or answer a pending question); returns the terminal output (\r\n line endings). */
   handle(line: string): string {
     this.buf = [];
-    try { this.dispatch(line); } finally { this.fixCwd(); this.onChange(); }
+    try {
+      const p = this.pending;
+      if (p) { this.pending = null; p.cb(line); }
+      else this.dispatch(line);
+    } finally { this.fixCwd(); this.onChange(); }
     return this.buf.join('');
   }
 
+  /** Ctrl+C while a question is waiting for an answer. */
+  interrupt(): void { this.pending = null; }
+
+  /** Ask the student something (a password, a name, ...); the next handle() call is the answer. */
+  private ask(prompt: string, secret: boolean, cb: (answer: string) => void): void {
+    this.pending = { prompt, secret, cb };
+  }
+
   private fixCwd(): void {
-    while (!this.fs.isDir(this.cwd) && this.cwd !== ROOT) this.cwd = dirname(this.cwd);
+    while (!this.fs.isDir(this.cwd) && this.cwd !== '/') this.cwd = dirname(this.cwd);
     if (!this.fs.isDir(this.prev)) this.prev = this.cwd;
+  }
+
+  private expand(rawArgs: string[]): Arg[] {
+    const args: Arg[] = [];
+    for (const raw of rawArgs) {
+      const a = this.expandTilde(raw);
+      if (a.startsWith('-') && a.length > 1) args.push({ value: a, raw, globbed: false });
+      else {
+        const globbed = /[*?[]/.test(a);
+        for (const value of expandGlob(this.fs, this.cwd, a)) args.push({ value, raw, globbed });
+      }
+    }
+    return args;
   }
 
   private dispatch(line: string): void {
@@ -298,6 +388,12 @@ export class Lab {
     const cmd = tokens[0];
     const rawArgs = tokens.slice(1);
 
+    const e0: Omit<Entry, 'user1' | 'cwd1' | 'rc'> = { line, cmd, raw: rawArgs, argv: [], user: this.who, cwd0: this.cwd };
+    if (cmd === 'exit') {
+      this.doExit();
+      this.record(e0, 0);
+      return;
+    }
     if (META.includes(cmd)) { this.meta(cmd); return; }
     if (!ALLOWED.includes(cmd)) {
       this.print(tr(`${cmd}: not available in the lab. You have: ${ALLOWED.join(' ')}`,
@@ -313,20 +409,23 @@ export class Lab {
       }
     }
 
-    const args: Arg[] = [];
-    for (const raw of rawArgs) {
-      const a = this.expandTilde(raw);
-      if (a.startsWith('-') && a.length > 1) args.push({ value: a, raw, globbed: false });
-      else {
-        const globbed = /[*?[]/.test(a);
-        for (const value of expandGlob(this.fs, this.cwd, a)) args.push({ value, raw, globbed });
-      }
-    }
-    const values = args.map(a => a.value);
-
+    const args = this.expand(rawArgs);
+    e0.argv = args.map(a => a.value);
     this.state.commands++;
-    if (cmd === 'pwd') { this.print(this.cwd); return; }
-    if (cmd === 'cd') { this.doCd(values); return; }
+    this.run(cmd, args, this.who, e0, rc => this.record(e0, rc));
+  }
+
+  /** Run an allowed command as `actor` (the logged-in user, or root through sudo). */
+  private run(cmd: string, args: Arg[], actor: string, e: Omit<Entry, 'user1' | 'cwd1' | 'rc'>, done: (rc: number) => void): void {
+    const values = args.map(a => a.value);
+    if (cmd === 'pwd') { this.print(this.cwd); return done(0); }
+    if (cmd === 'cd') return done(this.doCd(values, actor));
+    if (cmd === 'su') return this.su(values, actor, done);
+    if (cmd === 'sudo') return this.sudo(args, e, done);
+
+    this.useActor(actor);
+    const admin = ADMIN[cmd];
+    if (admin) return admin(this.adminEnv(actor), values, done);
 
     const v = this.vet(cmd, args);
     if (!v.ok) {
@@ -338,27 +437,132 @@ export class Lab {
       } else {
         this.print(red(tr('✗ blocked: ', '✗ geblokkeerd: ')) + v.msg);
       }
-      return;
+      return done(1);
     }
-
-    const ctx: Ctx = { fs: this.fs, cwd: this.cwd, width: this.width, print: s => this.print(s) };
-    COMMANDS[cmd](ctx, values);
+    const who = this.whoOf(actor);
+    const ctx: Ctx = {
+      fs: this.fs, cwd: this.cwd, width: this.width, print: s => this.print(s),
+      can: (path, bit) => this.fs.access(path, who, bit),
+    };
+    done(COMMANDS[cmd](ctx, values));
   }
 
-  private doCd(args: string[]): void {
-    if (args.length > 1) { this.print(tr('cd: too many arguments', 'cd: te veel argumenten')); return; }
-    let target = args[0] ?? ROOT;
-    if (target === '-') target = this.prev;
-    const full = this.resolve(target);
-    if (!this.inside(full)) {
-      this.print(red(tr('✗ blocked: ', '✗ geblokkeerd: ')) +
-        tr(`you cannot leave the lab (${ROOT}).`, `je kunt het lab niet verlaten (${ROOT}).`));
+  private adminEnv(actor: string): AdminEnv {
+    return {
+      sys: this.sys, fs: this.fs, actor, loggedIn: [this.who, ...this.stack.map(s => s.user)],
+      print: s => this.print(s), ask: (p, secret, cb) => this.ask(p, secret, cb),
+    };
+  }
+
+  // ---- identities: su, sudo, exit ------------------------------------------------
+  private su(args: string[], actor: string, done: (rc: number) => void): void {
+    const login = args.some(a => a === '-' || a === '-l' || a === '--login');
+    const target = args.filter(a => !a.startsWith('-') || a === '-').filter(a => a !== '-')[0] ?? 'root';
+    const u = userBy(this.sys, target);
+    if (!u) {
+      this.print(`su: user ${target} does not exist or the user entry does not contain all the required fields`);
+      return done(1);
+    }
+    const go = () => {
+      this.stack.push({ user: this.who, cwd: this.cwd, prev: this.prev });
+      this.who = target;
+      if (login) this.cwd = this.prev = this.fs.isDir(u.home) ? u.home : '/';
+      done(0);
+    };
+    if (actor === 'root') return go();
+    this.ask('Password: ', true, pw => {
+      if (u.password !== null && pw === u.password) return go();
+      this.print('su: Authentication failure');
+      done(1);
+    });
+  }
+
+  private sudo(args: Arg[], e: Omit<Entry, 'user1' | 'cwd1' | 'rc'>, done: (rc: number) => void): void {
+    const vals = args.map(a => a.value);
+    if (!vals.length) {
+      this.print('usage: sudo -h | -K | -k | -V');
+      this.print('usage: sudo -i | command [args]');
+      return done(1);
+    }
+    this.sudoLogin(() => {
+      if (vals[0] === '-i' || vals[0] === '-s') {            // become root: a login shell in /root
+        this.stack.push({ user: this.who, cwd: this.cwd, prev: this.prev });
+        this.who = 'root';
+        this.cwd = this.prev = '/root';
+        return done(0);
+      }
+      const inner = vals[0];
+      if (!ALLOWED.includes(inner) || inner === 'sudo') {
+        this.print(`sudo: ${inner}: command not found`);
+        return done(1);
+      }
+      e.cmd = inner; e.raw = e.raw.slice(1); e.argv = vals.slice(1); e.user = 'root';   // the mission log sees the inner command
+      this.run(inner, args.slice(1), 'root', e, done);
+    }, done);
+  }
+
+  /** sudo asks for the password of the user who calls it (and remembers it for 15 minutes). */
+  private sudoLogin(next: () => void, done: (rc: number) => void): void {
+    const w = this.who;
+    if (w === 'root') return next();
+    if (!isSudoer(this.sys, w)) {
+      this.print(`${w} is not in the sudoers file.  This incident will be reported.`);
+      return done(1);
+    }
+    if (this.sudoCache && this.sudoCache.user === w && Date.now() < this.sudoCache.until) return next();
+    const u = userBy(this.sys, w)!;
+    let tries = 0;
+    const askPw = () => this.ask(`[sudo] password for ${w}: `, true, pw => {
+      if (u.password !== null && pw === u.password) {
+        this.sudoCache = { user: w, until: Date.now() + 15 * 60000 };
+        return next();
+      }
+      if (++tries >= 3) { this.print('sudo: 3 incorrect password attempts'); return done(1); }
+      this.print('Sorry, try again.');
+      askPw();
+    });
+    askPw();
+  }
+
+  private doExit(): void {
+    const back = this.stack.pop();
+    if (!back) {
+      this.print(tr('This is the browser lab - just close the tab. Your progress is saved.',
+        'Dit is het browser-lab - sluit gewoon het tabblad. Je voortgang wordt bewaard.'));
       return;
     }
-    if (!this.fs.exists(full)) { this.print(tr(`cd: no such file or directory: ${target}`, `cd: bestand of map bestaat niet: ${target}`)); return; }
-    if (!this.fs.isDir(full)) { this.print(tr(`cd: not a directory: ${target}`, `cd: geen map: ${target}`)); return; }
+    this.who = back.user;
+    this.cwd = back.cwd;
+    this.prev = back.prev;
+  }
+
+  private doCd(args: string[], actor: string): number {
+    if (args.length > 1) { this.print('cd: too many arguments'); return 1; }
+    let target = args[0] ?? this.home;
+    if (target === '-') target = this.prev;
+    const full = this.resolve(target);
+    if (!this.fs.exists(full)) { this.print(`cd: ${target}: No such file or directory`); return 1; }
+    if (!this.fs.isDir(full)) { this.print(`cd: ${target}: Not a directory`); return 1; }
+    if (!this.fs.access(full, this.whoOf(actor), 'x')) { this.print(`cd: ${target}: Permission denied`); return 1; }
     this.prev = this.cwd;
     this.cwd = full;
+    return 0;
+  }
+
+  // ---- the mission log -------------------------------------------------------------
+  private record(e: Omit<Entry, 'user1' | 'cwd1' | 'rc'>, rc: number): void {
+    const entry: Entry = { ...e, user1: this.who, cwd1: this.cwd, rc };
+    this.entries.push(entry);
+    if (this.entries.length > 300) this.entries.shift();
+    this.evaluate(entry);
+  }
+
+  /** Latch every mission that is satisfied now. */
+  evaluate(cur?: Entry): void {
+    const ctx = { sys: this.sys, fs: this.fs, entries: this.entries, cur, home: ROOT };
+    for (const m of this.spec.missions ?? []) {
+      if (!this.state.done.includes(m.id) && isDone(m, ctx)) this.state.done.push(m.id);
+    }
   }
 
   // ---- meta commands ---------------------------------------------------------
@@ -375,8 +579,8 @@ export class Lab {
       const what = cmd === 'reset'
         ? tr('restart this exercise from scratch', 'deze oefening helemaal opnieuw starten')
         : tr('start a NEW random exercise', 'een NIEUWE willekeurige oefening starten');
-      const q = tr(`This will ${what} and wipe ~/work and ~/stock. Continue?`,
-        `Dit gaat ${what} en ~/work en ~/stock wissen. Doorgaan?`);
+      const q = tr(`This will ${what} and reset the whole lab (files, users and groups). Continue?`,
+        `Dit gaat ${what} en het hele lab terugzetten (bestanden, gebruikers en groepen). Doorgaan?`);
       if (!this.confirm(q)) { this.print(tr('cancelled', 'geannuleerd')); return; }
       const seed = cmd === 'reset' ? this.spec.seed : 1 + Math.floor(Math.random() * 99999);
       this.startNew(seed, cmd === 'reset' ? this.spec.options! : this.options);
@@ -385,8 +589,10 @@ export class Lab {
   }
 
   showHelp(): void {
-    this.print(bold(tr('Available commands', "Beschikbare commando's")));
-    this.print('  ' + ALLOWED.join('  '));
+    this.print(bold(tr('Files and directories', 'Bestanden en mappen')));
+    this.print('  ' + FILE_CMDS.join('  '));
+    this.print(bold(tr('Users and groups', 'Gebruikers en groepen')));
+    this.print('  ' + USER_CMDS.join('  '));
     this.print(bold(tr('Lab commands', "Lab-commando's")));
     const rows: [string, string][] = [
       ['task', tr('show the exercise again', 'toon de oefening opnieuw')],
@@ -394,18 +600,18 @@ export class Lab {
       ['hint', tr('one nudge in the right direction', 'een duwtje in de goede richting')],
       ['reset', tr('same exercise, fresh start', 'dezelfde oefening, opnieuw beginnen')],
       ['new', tr('a different random exercise', 'een andere willekeurige oefening')],
-      ['exit', tr('leave the lab', 'verlaat het lab')],
+      ['exit', tr('go back to the previous user (after su / sudo -i)', 'terug naar de vorige gebruiker (na su / sudo -i)')],
     ];
     for (const [n, d] of rows) this.print('  ' + n.padEnd(7) + ' ' + d);
     this.print(bold(tr('Notes', 'Opmerkingen')));
-    this.print(tr(`  ~ stands for the lab directory (${ROOT}); ~/... counts as an absolute path.`,
-      `  ~ staat voor de labmap (${ROOT}); ~/... telt als een absoluut pad.`));
     this.print(tr('  Wildcards like *.txt work. Pipes, redirection and ; && are off.',
       '  Wildcards zoals *.txt werken. Pipes, omleidingen en ; && staan uit.'));
     this.print(tr('  *  any number of characters      ?  exactly one character',
       "  *  willekeurig aantal tekens     ?  precies één willekeurig teken"));
     this.print(tr('  ~  your home directory           .  the current directory     ..  the parent directory',
       '  ~  je homemap                    .  de huidige map            ..  de bovenliggende map'));
+    this.print(tr(`  You are ${this.who}. Administrator tasks need sudo (password: labolinux). Tab completes names.`,
+      `  Je bent ${this.who}. Beheertaken vragen sudo (paswoord: labolinux). Tab vult namen aan.`));
   }
 
   private annotation(n: Target): string {
@@ -434,10 +640,32 @@ export class Lab {
 
   showTask(): void {
     const s = this.spec;
+    const folders = s.options?.features.folders !== false;
+    const missions = s.missions ?? [];
     this.print();
     const level = difficultyName(s.level) + (s.options && isCustom(s.options) ? tr(', customised', ', aangepast') : '');
     this.print(bold(tr(`═══ Exercise #${s.seed} (${level}) ═══`, `═══ Oefening #${s.seed} (${level}) ═══`)));
-    this.print(tr(`Lab directory: ${ROOT}   (shown as ~ in the prompt)`, `Labmap: ${ROOT}   (in de prompt weergegeven als ~)`));
+    this.print(tr(`You are ${this.who} (password: labolinux) on the machine "lab". ~ is your home directory: ${this.home}`,
+      `Je bent ${this.who} (paswoord: labolinux) op de machine "lab". ~ is je home directory: ${this.home}`));
+    if (folders) this.showStructure();
+    if (missions.length) this.showMissions();
+    this.showRules(folders);
+  }
+
+  private showMissions(): void {
+    const missions = this.spec.missions ?? [];
+    const done = missions.filter(m => this.state.done.includes(m.id)).length;
+    this.print();
+    this.print(bold(tr('Assignments', 'Opdrachten')) + dim(` (${done}/${missions.length})`));
+    missions.forEach((m, i) => {
+      const ok = this.state.done.includes(m.id);
+      const n = String(i + 1).padStart(2);
+      this.print('  ' + (ok ? green('✔') : '☐') + ` ${n}. ` + (ok ? dim(missionText(m)) : missionText(m)));
+    });
+  }
+
+  private showStructure(): void {
+    const s = this.spec;
     this.print(tr('Make ~/work look EXACTLY like this - nothing more, nothing less:',
       'Zorg dat ~/work er EXACT zo uitziet - niets meer, niets minder:'));
     this.print();
@@ -463,7 +691,7 @@ export class Lab {
     const width = Math.max(...rows.map(r => r[0].length)) + 2;
     for (const [left, ann] of rows) this.print('  ' + left.padEnd(width) + ann);
 
-    const groups = this.spec.groups ?? [];
+    const groups = s.groups ?? [];
     if (groups.length) {
       this.print();
       this.print(bold(tr('Wildcards', 'Wildcards')) +
@@ -489,21 +717,26 @@ export class Lab {
         this.print('  ' + ('~/' + rel + (j.type === 'dir' ? '/' : '')).padEnd(30) + ' ' + what + extra);
       }
     }
-    const targets = Object.values(this.targets);
-    const usesStock = targets.some(n => n.mode === 'restricted');
-    if (targets.some(n => n.mode === 'restricted' && n.source!.startsWith('work/'))) {
+    if (Object.values(this.targets).some(n => n.mode === 'restricted' && n.source!.startsWith('work/'))) {
       this.print('  ' + dim(tr('(items marked ★ that currently live inside ~/work must end up at their new place only)',
         '(items met ★ die nu in ~/work staan, mogen enkel op hun nieuwe plaats terechtkomen)')));
     }
+  }
+
+  private showRules(folders: boolean): void {
+    const targets = Object.values(this.targets);
+    const junk = Object.values(this.junk);
+    const groups = this.spec.groups ?? [];
+    const usesStock = targets.some(n => n.mode === 'restricted');
     this.print();
     this.print(bold(tr('Rules', 'Regels')));
-    this.print(tr(`  • Commands: ${ALLOWED.join(' ')}   (type \`help\` for the lab commands)`,
-      `  • Commando's: ${ALLOWED.join(' ')}   (typ \`help\` voor de lab-commando's)`));
+    this.print(tr(`  • Commands: ${FILE_CMDS.join(' ')}   (type \`help\` for all commands)`,
+      `  • Commando's: ${FILE_CMDS.join(' ')}   (typ \`help\` voor alle commando's)`));
     if (usesStock) {
       this.print('  • ' + yellow('★') + tr(' items may NOT be made with mkdir/touch - bring them over with cp or mv.',
         ' items mag je NIET met mkdir/touch maken - breng ze over met cp of mv.'));
     }
-    if (targets.some(n => n.style && n.style !== 'dot') || junk.some(([, j]) => j.style)) {
+    if (targets.some(n => n.style && n.style !== 'dot') || junk.some(j => j.style)) {
       this.print('  • ' + cyan('◆') + tr(' items must be created/removed with the stated kind of path (~/... is absolute, and also a path "with ~").',
         ' items moet je aanmaken/verwijderen met het opgegeven soort pad (~/... is absoluut, en ook een pad "met ~").'));
     }
@@ -515,15 +748,19 @@ export class Lab {
       this.print('  • ' + tr('"use . as destination" means: cd into the target directory, then e.g. mv ~/stock/file . (. is the current directory).',
         '"gebruik . als bestemming" betekent: ga met cd naar de doelmap en doe dan bv. mv ~/stock/bestand . (. is de huidige map).'));
     }
-    if (junk.some(([, j]) => j.rmdirOnly)) {
+    if (junk.some(j => j.rmdirOnly)) {
       this.print('  • ' + tr('Directories marked ', 'Mappen met ') + red(tr('rmdir only', 'enkel rmdir')) +
         tr(' may not be removed with rm.', ' mag je niet met rm verwijderen.'));
     }
-    if (usesStock || groups.length) {
-      this.print(tr('  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.',
-        '  • ~/stock mag in elke toestand blijven. Een regel breken blokkeert het commando en wordt geteld.'));
-    } else {
-      this.print(tr('  • Breaking a rule blocks the command and is counted.', '  • Een regel breken blokkeert het commando en wordt geteld.'));
+    if (folders) {
+      this.print(usesStock || groups.length
+        ? tr('  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.',
+          '  • ~/stock mag in elke toestand blijven. Een regel breken blokkeert het commando en wordt geteld.')
+        : tr('  • Breaking a rule blocks the command and is counted.', '  • Een regel breken blokkeert het commando en wordt geteld.'));
+    }
+    if ((this.spec.missions ?? []).length) {
+      this.print('  • ' + tr('Administrator tasks (users, groups) need sudo: your password is labolinux. `su` and `sudo -i` change who you are, `exit` takes you back.',
+        'Beheertaken (users, groepen) vragen sudo: je paswoord is labolinux. `su` en `sudo -i` veranderen wie je bent, met `exit` kom je terug.'));
     }
     this.print('  • ' + tr('Type ', 'Typ ') + bold('check') + tr(' when you think you are done.', ' wanneer je denkt dat je klaar bent.'));
     this.print();
@@ -540,8 +777,15 @@ export class Lab {
     return m;
   }
 
-  /** True when ~/work matches the target exactly (no output). */
-  isSolved(): boolean { return this.analyse().ok; }
+  /** True when ~/work matches the target exactly and every mission is done (no output). */
+  isSolved(): boolean {
+    this.evaluate();
+    return this.analyse().ok && this.pendingMissions().length === 0;
+  }
+
+  private pendingMissions() {
+    return (this.spec.missions ?? []).filter(m => !this.state.done.includes(m.id));
+  }
 
   private analyse() {
     const actual = this.actual();
@@ -567,13 +811,17 @@ export class Lab {
   }
 
   check(): boolean {
-    const { actual, missing, wrongType, badContent, extra, ok } = this.analyse();
+    this.evaluate();
+    const { actual, missing, wrongType, badContent, extra, ok: foldersOk } = this.analyse();
+    const showFolders = this.spec.options?.features.folders !== false;
+    const missions = this.spec.missions ?? [];
+    const ok = foldersOk && this.pendingMissions().length === 0;
     const total = Object.keys(this.targets).length;
     const present = total - missing.length - wrongType.length;
     const slash = (rel: string) => (this.targets[rel]?.type === 'dir' ? '/' : '');
     this.print();
     this.print(bold('── check ──────────────────────────────────────'));
-    this.print((present === total ? green('✔') : yellow('•')) +
+    if (showFolders) this.print((present === total ? green('✔') : yellow('•')) +
       tr(` ${present}/${total} target items present`, ` ${present}/${total} doelitems aanwezig`));
     if (missing.length) {
       this.print(red(tr(`✘ missing (${missing.length}):`, `✘ ontbreekt (${missing.length}):`)));
@@ -597,6 +845,12 @@ export class Lab {
       this.print(red(tr(`✘ should not be there (${extra.length}):`, `✘ hoort er niet te staan (${extra.length}):`)));
       for (const r of extra) this.print(`    ~/${r}${actual.get(r) === 'dir' ? '/' : ''}`);
     }
+    if (missions.length) {
+      const doneN = missions.length - this.pendingMissions().length;
+      this.print((doneN === missions.length ? green('✔') : yellow('•')) +
+        tr(` ${doneN}/${missions.length} assignments done`, ` ${doneN}/${missions.length} opdrachten gedaan`));
+      for (const m of this.pendingMissions()) this.print('    ☐ ' + missionText(m));
+    }
     const v = this.state.violations;
     this.print(tr('rule violations: ', 'regelovertredingen: ') + (v === 0 ? green('0') : red(String(v))) +
       tr('   commands run: ', "   uitgevoerde commando's: ") + this.state.commands);
@@ -616,6 +870,7 @@ export class Lab {
   }
 
   hint(): void {
+    this.evaluate();
     const actual = this.actual();
     for (const [rel, n] of Object.entries(this.targets)) {
       if (actual.has(rel)) continue;
@@ -653,6 +908,12 @@ export class Lab {
       }
       return;
     }
+    const next = this.pendingMissions()[0];
+    if (next) {
+      this.print(tr('Next assignment: ', 'Volgende opdracht: ') + missionText(next));
+      this.print(dim(tr('Tip: ', 'Tip: ') + missionHint(next)));
+      return;
+    }
     this.print(tr('The structure looks complete. Run `check` to verify the details.',
       'De structuur lijkt compleet. Voer `check` uit om de details te controleren.'));
   }
@@ -672,7 +933,7 @@ export class Lab {
     const d = i < 0 ? '' : t.slice(0, i) || '/';
     const base = i < 0 ? t : t.slice(i + 1);
     const search = d ? this.resolve(d) : this.cwd;
-    if (!this.inside(search) || !this.fs.isDir(search)) return [];
+    if (!this.fs.isDir(search) || !this.fs.access(search, this.whoOf(this.who), 'r')) return [];
     const prefix = text.slice(0, text.length - base.length);
     const out: string[] = [];
     for (const n of this.fs.list(search).sort()) {

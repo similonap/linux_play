@@ -10,9 +10,9 @@ in TypeScript (Vite + xterm.js) en wordt gehost op GitHub Pages; er is geen serv
   geheugen en wordt in `localStorage` bewaard, dus een refresh gaat verder waar je was.
 - **⚙ Instellingen**: kies een moeilijkheid (makkelijk / gemiddeld / moeilijk: de grootte van de
   oefening plus welke onderdelen standaard aan staan) en vink daarna zelf aan wat je wilt oefenen:
-  kopiëren/verplaatsen, absolute paden, relatieve paden (`..`), `~`, `.` als bestemming,
-  wildcard `*`, wildcard `?`, verwijderen en de rmdir-regel. Aanmaken (`mkdir`, `touch`) en
-  navigeren zit er altijd in. Je keuze wordt in de browser bewaard en gebruikt voor elke nieuwe oefening.
+  mappenstructuur, navigeren, gebruikers, groepen, kopiëren/verplaatsen, absolute paden,
+  relatieve paden (`..`), `~`, `.` als bestemming, wildcard `*`, wildcard `?`, verwijderen en de
+  rmdir-regel. Daarnaast zijn er snelkeuzes voor labo 3. Je keuze wordt in de browser bewaard en gebruikt voor elke nieuwe oefening.
 - `?seed=4242` geeft iedereen dezelfde oefening. `?level=1|2|3` kiest de moeilijkheid en
   `?features=copymove,abs,rel,home,dot,star,question,remove,rmdironly` (komma-gescheiden, enkel
   wat je opsomt staat aan) kiest de onderdelen, bv. een link voor een les over wildcards:
@@ -32,6 +32,28 @@ in TypeScript (Vite + xterm.js) en wordt gehost op GitHub Pages; er is geen serv
 
 `~/work` moet er op het einde EXACT zo uitzien, en alles wat in de lijst "Verwijder uit ~/work"
 staat moet weg.
+
+## Labo 3: navigatie, gebruikers en groepen
+
+Naast de mappenstructuur kan een oefening ook **opdrachten** bevatten (vink ze aan in ⚙ Instellingen, of
+kies een snelkeuze "Labo 3"). De machine eromheen is een volledige simulatie met `/etc`, `/var/log`,
+`/home/<user>`, gebruikers, groepen en rechten:
+
+| Onderdeel | Commando's |
+|---|---|
+| Navigeren | `ls /etc`, `cd /var/log`, `cd`, `cd -`, `cd ..`, `cd /` |
+| Gebruikers | `useradd`, `adduser` (stelt echt vragen), `passwd`, `userdel [-r]`, `su [-]`, `sudo`, `sudo -i`, `exit`, `whoami` |
+| Groepen | `groupadd`, `groupdel`, `groupmod -n`, `usermod -a -G`, `groups`, `id`, `members` (eerst `sudo apt install members`) |
+
+- Je bent `student` (paswoord `labolinux`, lid van `sudo`). Beheercommando's zonder `sudo` geven
+  "Permission denied". Paswoordvragen worden niet getoond terwijl je typt.
+- `su` en `sudo -i` veranderen wie je bent (de prompt volgt, `#` voor root), `exit` brengt je terug.
+- `useradd` maakt **geen** home directory (zonder `-m`), `adduser` wel: dat verschil zie je door
+  met `su` naar de nieuwe gebruiker te gaan.
+- Rechten zijn echt: je kan buiten je eigen home niets maken of verwijderen, en bestanden krijgen de
+  gebruiker die ze aanmaakte als eigenaar (`ls -l`).
+- Elke opdracht wordt afgevinkt zodra je ze gedaan hebt (zichtbaar in `task`, `check` en de header).
+  Een oefening zonder mappenstructuur (alleen opdrachten) kan ook.
 
 ## De regels en hoe ze afgedwongen worden
 
@@ -63,7 +85,10 @@ npm run build     # tsc + vite build naar dist/
 |---|---|
 | `src/generator.ts` | willekeurige oefening uit een seed (`LEVELS`, naamlijsten bovenaan) |
 | `src/lab.ts` | regelcontrole (`vet`), meta-commando's, `check`, `hint`, opdracht, tab-aanvulling |
-| `src/commands.ts` | `ls cp mv rm rmdir mkdir touch tree` op het virtuele bestandssysteem |
+| `src/commands.ts` | `ls cp mv rm rmdir mkdir touch tree` op het virtuele bestandssysteem (met rechten) |
+| `src/admin.ts` | `useradd adduser passwd userdel groupadd groupdel groupmod usermod groups id members whoami apt` |
+| `src/world.ts` | de gesimuleerde machine: gebruikers, groepen, `/etc`, `/var/log`, homes |
+| `src/missions.ts` | de opdrachten (navigatie, gebruikers, groepen) en hun controle |
 | `src/vfs.ts` | bestandssysteem in het geheugen |
 | `src/shell.ts` | tokenizer en wildcards |
 | `src/session.ts` | bewaren/hervatten van een lab |

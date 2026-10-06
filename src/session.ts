@@ -1,4 +1,4 @@
-import { Lab, State } from './lab';
+import { Lab, State, WorldState } from './lab';
 import { Spec, Options, presetOptions, sameOptions, isCustom } from './generator';
 import { Lang, setLang, tr } from './i18n';
 import { bold, dim } from './ansi';
@@ -18,9 +18,10 @@ export interface SessionOpts {
 
 export interface Info {
   seed: number; difficulty: number; custom: boolean; commands: number; violations: number; solved: boolean;
+  missionsDone: number; missionsTotal: number;
 }
 
-const SAVE_VERSION = 2;
+const SAVE_VERSION = 3;
 
 /** One student's lab, persisted through `store`. */
 export class Session {
@@ -37,8 +38,8 @@ export class Session {
     try {
       const raw = this.store.load();
       if (raw) {
-        const d = JSON.parse(raw) as { v: number; spec: Spec; state: State; fs: unknown };
-        if (d.v === SAVE_VERSION) { this.lab.restore(d.spec, d.state, d.fs); loaded = true; }
+        const d = JSON.parse(raw) as { v: number; spec: Spec; state: State; fs: unknown; world: WorldState };
+        if (d.v === SAVE_VERSION) { this.lab.restore(d.spec, d.state, d.fs, d.world); loaded = true; }
       }
     } catch { loaded = false; }
 
@@ -56,7 +57,7 @@ export class Session {
 
   private save(): void {
     try {
-      this.store.save(JSON.stringify({ v: SAVE_VERSION, spec: this.lab.spec, state: this.lab.state, fs: this.lab.fs.toJSON() }));
+      this.store.save(JSON.stringify({ v: SAVE_VERSION, spec: this.lab.spec, state: this.lab.state, fs: this.lab.fs.toJSON(), world: this.lab.worldState() }));
     } catch { /* storage full or unavailable: the lab still works, it just will not survive a reload */ }
   }
 
@@ -85,12 +86,17 @@ export class Session {
 
   run(line: string): string { return this.lab.handle(line); }
   prompt(): string { return this.lab.prompt(); }
+  /** true while the lab waits for a password: the terminal must not echo what is typed */
+  isSecret(): boolean { return !!this.lab.pending?.secret; }
+  isAsking(): boolean { return !!this.lab.pending; }
+  interrupt(): void { this.lab.interrupt(); }
   complete(line: string): string[] { return this.lab.complete(line); }
 
   info(): Info {
     const { spec, state } = this.lab;
     return { seed: spec.seed, difficulty: spec.level, custom: !!spec.options && isCustom(spec.options),
-      commands: state.commands, violations: state.violations, solved: state.solved };
+      commands: state.commands, violations: state.violations, solved: state.solved,
+      missionsDone: (spec.missions ?? []).filter(m => state.done.includes(m.id)).length, missionsTotal: (spec.missions ?? []).length };
   }
 }
 
