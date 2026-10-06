@@ -795,7 +795,8 @@ class Lab:
             return yellow(tr("★ no mkdir/touch → copy or move it from ~/%s",
                              "★ geen mkdir/touch → kopieer of verplaats het vanuit ~/%s") % n["source"])
         if n["mode"] == "inherit":
-            return dim(tr("(comes along: ~/%s)", "(komt mee: ~/%s)") % n["source"])
+            return dim(tr("(comes along automatically with the directory above it: ~/%s)",
+                          "(gaat automatisch mee met de map erboven: ~/%s)") % n["source"])
         if n["mode"] == "exists":
             return dim(tr("(already there)", "(staat er al)"))
         if n["style"] == "abs":

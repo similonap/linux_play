@@ -34,7 +34,7 @@ look-alike is used and the student is told how to install the real one.
   │   └── tests/
   ├── build/              (already there)
   ├── images/             ★ no mkdir/touch → copy or move it from ~/work/images_backup
-  │   └── data.csv        (comes along: ~/work/images_backup/data.csv)
+  │   └── data.csv        (comes along with the directory above it: ~/work/images_backup/data.csv)
   └── src/                (already there)
 
 Remove from ~/work:
