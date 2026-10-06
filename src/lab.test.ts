@@ -18,7 +18,7 @@ function solve(s: Session): void {
   // 1. everything the student has to create
   for (const [rel, n] of Object.entries(targets)) {
     if (n.mode !== 'create') continue;
-    const p = n.style === 'rel' ? rel.slice('work/'.length) : `${ROOT}/${rel}`;
+    const p = n.style === 'rel' ? rel : `${ROOT}/${rel}`;
     run(`${n.type === 'dir' ? 'mkdir' : 'touch'} ${p}`);
   }
   // 2. then move the restricted items; deepest sources first, because a source can
@@ -28,7 +28,7 @@ function solve(s: Session): void {
   for (const [rel, n] of restricted) run(`mv ${ROOT}/${n.source} ${ROOT}/${rel}`);
   for (const [rel, j] of Object.entries(junk)) {
     if (j.child) continue;
-    const p = j.style === 'rel' ? rel.slice('work/'.length) : `${ROOT}/${rel}`;
+    const p = j.style === 'rel' ? rel : `${ROOT}/${rel}`;
     run(j.rmdirOnly ? `rmdir ${p}` : j.type === 'dir' ? `rm -r ${p}` : `rm ${p}`);
   }
 }
@@ -95,11 +95,14 @@ describe('lab', () => {
     expect(strip(s.run('ls /etc'))).toContain('blocked');
     expect(strip(s.run('rm -r ~/work'))).toContain('blocked');
     expect(strip(s.run('ls | cat'))).toContain('Pipes');
+    expect(s.prompt()).toBe('student@lab:~$ ');
+    s.run('cd work');
     expect(s.prompt()).toBe('student@lab:~/work$ ');
   });
 
   it('supports wildcards, cd and tab completion', () => {
     const s = newSession(1, 1);
+    s.run('cd work');
     s.run('touch a.txt b.txt');
     expect(strip(s.run('ls *.txt'))).toContain('a.txt');
     s.run('mkdir -p sub/deep');
@@ -112,7 +115,7 @@ describe('lab', () => {
   it('resumes from storage and speaks Dutch by default', () => {
     const store = memStore();
     const a = new Session({ store, confirm: () => true, seed: 7, level: 1, lang: 'nl' });
-    a.run('touch zzz');
+    a.run('touch work/zzz');
     const b = new Session({ store, confirm: () => true, lang: 'nl' });
     expect(b.resumed).toBe(true);
     expect(b.lab.fs.exists(`${ROOT}/work/zzz`)).toBe(true);
@@ -130,6 +133,7 @@ describe('lab', () => {
 
   it('ls -l, tree and cp -r behave', () => {
     const s = newSession(1, 1);
+    s.run('cd work');
     s.run('mkdir x');
     s.run('touch x/f');
     s.run('cp -r x y');

@@ -53,8 +53,8 @@ export class Lab {
   fs = new VFS();
   spec!: Spec;
   state!: State;
-  cwd = ROOT + '/work';
-  prev = ROOT + '/work';
+  cwd = ROOT;
+  prev = ROOT;
   width = 80;
   /** Asks a yes/no question (window.confirm in the browser). */
   confirm: (q: string) => boolean = () => true;
@@ -73,7 +73,7 @@ export class Lab {
     this.spec = spec;
     this.state = state;
     this.fs = VFS.fromJSON(fsData);
-    this.cwd = this.prev = ROOT + '/work';
+    this.cwd = this.prev = ROOT;
   }
 
   startNew(seed: number, level: number): void {
@@ -83,7 +83,7 @@ export class Lab {
     this.fs.mkdirp(ROOT + '/stock');
     this.materialize();
     this.state = { violations: 0, commands: 0, solved: false, started: new Date().toISOString() };
-    this.cwd = this.prev = ROOT + '/work';
+    this.cwd = this.prev = ROOT;
     this.onChange();
   }
 
