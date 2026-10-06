@@ -66,6 +66,17 @@ LEVELS = {
 
 USE_COLOR = sys.stdout.isatty()
 
+# Interface language: "nl" (default) or "en".  Switch with --lang, $FSLAB_LANG
+# or, in the browser, the language toggle (Session.set_lang).
+LANG = os.environ.get("FSLAB_LANG", "nl")
+if LANG not in ("nl", "en"):
+    LANG = "nl"
+
+
+def tr(en, nl):
+    """Pick the English or Dutch text for the current interface language."""
+    return nl if LANG == "nl" else en
+
 
 def c(text, code):
     return f"\033[{code}m{text}\033[0m" if USE_COLOR else str(text)
@@ -463,12 +474,15 @@ class Lab:
         for i, p in enumerate(paths):
             full = self.resolve(p)
             if not self.inside(full):
-                return False, "'%s' is outside the lab. Everything happens inside %s." % (p, self.root), False
+                return False, tr("'%s' is outside the lab. Everything happens inside %s.",
+                                     "'%s' ligt buiten het lab. Alles gebeurt binnen %s.") % (p, self.root), False
             if full == self.labdir or full.startswith(self.labdir + os.sep):
-                return False, "'%s' belongs to the lab itself, hands off." % p, False
+                return False, tr("'%s' belongs to the lab itself, hands off.",
+                                     "'%s' hoort bij het lab zelf, blijf eraf.") % p, False
             is_dest = cmd in ("cp", "mv") and i == len(paths) - 1
             if cmd in ("rm", "rmdir", "mv") and full in protected and not is_dest:
-                return False, "'%s' is part of the lab layout and cannot be removed or moved." % p, False
+                return False, tr("'%s' is part of the lab layout and cannot be removed or moved.",
+                                     "'%s' maakt deel uit van de labstructuur en kan niet verwijderd of verplaatst worden.") % p, False
 
         if cmd == "mkdir":
             parents = has_flag(opts, "p", "parents")
@@ -516,7 +530,8 @@ class Lab:
             dest, srcs = paths[-1], paths[:-1]
             dest_full = self.resolve(dest)
             if dest_full == self.root:
-                return False, "You cannot %s things onto the lab root itself." % cmd, False
+                return False, tr("You cannot %s things onto the lab root itself.",
+                                     "Je kunt niets met %s op de lab-hoofdmap zelf zetten.") % cmd, False
             if cmd == "mv":
                 for s in srcs:
                     sfull = self.resolve(s)
@@ -543,16 +558,19 @@ class Lab:
         return True, None, False
 
     def style_msg(self, full, wanted, used):
-        return "%s must be handled with %s path (you used %s one)." % (
-            self.disp(full), "an ABSOLUTE" if wanted == "abs" else "a RELATIVE",
-            "an absolute" if used == "abs" else "a relative")
+        return tr("%s must be handled with %s path (you used %s one).",
+                  "%s moet behandeld worden met %s pad (jij gebruikte %s pad).") % (
+            self.disp(full),
+            tr("an ABSOLUTE", "een ABSOLUUT") if wanted == "abs" else tr("a RELATIVE", "een RELATIEF"),
+            tr("an absolute", "een absoluut") if used == "abs" else tr("a relative", "een relatief"))
 
     def check_creation(self, full, style, cmd):
         node = self.targets.get(self.rel(full))
         if not node:
             return None
         if node["mode"] in ("restricted", "inherit"):
-            return "%s is not allowed for %s: that one has to be copied or moved from ~/%s." % (
+            return tr("%s is not allowed for %s: that one has to be copied or moved from ~/%s.",
+                      "%s is niet toegestaan voor %s: die moet je kopiëren of verplaatsen vanuit ~/%s.") % (
                 cmd, self.disp(full), node["source"])
         if node["style"] and node["style"] != style:
             return self.style_msg(full, node["style"], style)
@@ -563,7 +581,8 @@ class Lab:
         if not j:
             return None
         if j["rmdir_only"] and cmd != "rmdir":
-            return "%s is an empty directory that must be removed with rmdir (not %s)." % (self.disp(full), cmd)
+            return tr("%s is an empty directory that must be removed with rmdir (not %s).",
+                      "%s is een lege map die je met rmdir moet verwijderen (niet met %s).") % (self.disp(full), cmd)
         if j["style"] and j["style"] != style:
             return self.style_msg(full, j["style"], style)
         return None
@@ -573,7 +592,7 @@ class Lab:
         try:
             tokens = shlex.split(line)
         except ValueError as e:
-            print("syntax error: %s" % e)
+            print(tr("syntax error: %s", "syntaxfout: %s") % e)
             return
         if not tokens:
             return
@@ -583,13 +602,15 @@ class Lab:
             self.meta(cmd, raw_args)
             return
         if cmd not in ALLOWED:
-            print("%s: not available in the lab. You have: %s" % (cmd, " ".join(ALLOWED)))
-            print(dim("(plus: %s)" % " ".join(META)))
+            print(tr("%s: not available in the lab. You have: %s",
+                     "%s: niet beschikbaar in het lab. Je hebt: %s") % (cmd, " ".join(ALLOWED)))
+            print(dim(tr("(plus: %s)", "(plus: %s)") % " ".join(META)))
             self.log("[unknown] %s" % line)
             return
         for t in tokens:
             if SHELL_CHARS & set(t):
-                print("Pipes, redirection, chaining and variables are disabled in the lab. Wildcards (*) do work.")
+                print(tr("Pipes, redirection, chaining and variables are disabled in the lab. Wildcards (*) do work.",
+                         "Pipes, omleidingen, ketens van commando's en variabelen staan uit in het lab. Wildcards (*) werken wel."))
                 self.log("[blocked-syntax] %s" % line)
                 return
 
@@ -615,19 +636,22 @@ class Lab:
         if not ok:
             if violation:
                 self.state["violations"] += 1
-                print(red("✗ rule violation: ") + msg)
-                print(dim("  (command not executed - violations so far: %d)" % self.state["violations"]))
+                print(red(tr("✗ rule violation: ", "✗ regelovertreding: ")) + msg)
+                print(dim(tr("  (command not executed - violations so far: %d)",
+                             "  (commando niet uitgevoerd - overtredingen tot nu toe: %d)") % self.state["violations"]))
                 self.log("[VIOLATION] %s   <- %s" % (line, msg))
             else:
-                print(red("✗ blocked: ") + msg)
+                print(red(tr("✗ blocked: ", "✗ geblokkeerd: ")) + msg)
                 self.log("[blocked] %s   <- %s" % (line, msg))
             self.save_state()
             return
 
         if cmd == "tree" and (self.runner or shutil.which("tree") is None):
             if not self.runner and not self.tree_warned:
-                print(dim("(the real `tree` is not installed on this machine - using a built-in look-alike; "
-                          "install it with `sudo apt install tree` or `brew install tree`)"))
+                print(dim(tr("(the real `tree` is not installed on this machine - using a built-in look-alike; "
+                             "install it with `sudo apt install tree` or `brew install tree`)",
+                             "(het echte `tree` is niet geïnstalleerd op deze machine - er wordt een ingebouwde "
+                             "variant gebruikt; installeer het met `sudo apt install tree` of `brew install tree`)")))
                 self.tree_warned = True
             self.builtin_tree(args)
             rc = 0
@@ -638,30 +662,32 @@ class Lab:
             try:
                 rc = subprocess.run([cmd] + args, cwd=self.cwd, env=env).returncode
             except FileNotFoundError:
-                print("%s: program not found on this system" % cmd)
+                print(tr("%s: program not found on this system", "%s: programma niet gevonden op dit systeem") % cmd)
                 rc = 127
         self.log("[%s] %s" % ("ok" if rc == 0 else "exit %d" % rc, line))
         self.save_state()
 
     def do_cd(self, args):
         if len(args) > 1:
-            print("cd: too many arguments")
+            print(tr("cd: too many arguments", "cd: te veel argumenten"))
             return
         target = args[0] if args else self.root
         if target == "-":
             target = self.prev
         full = self.resolve(target)
         if not self.inside(full):
-            print(red("✗ blocked: ") + "you cannot leave the lab (%s)." % self.root)
+            print(red(tr("✗ blocked: ", "✗ geblokkeerd: ")) +
+                  tr("you cannot leave the lab (%s).", "je kunt het lab niet verlaten (%s).") % self.root)
             return
         if full == self.labdir or full.startswith(self.labdir + os.sep):
-            print(red("✗ blocked: ") + "that directory belongs to the lab itself.")
+            print(red(tr("✗ blocked: ", "✗ geblokkeerd: ")) +
+                  tr("that directory belongs to the lab itself.", "die map hoort bij het lab zelf."))
             return
         if not os.path.exists(full):
-            print("cd: no such file or directory: %s" % target)
+            print(tr("cd: no such file or directory: %s", "cd: bestand of map bestaat niet: %s") % target)
             return
         if not os.path.isdir(full):
-            print("cd: not a directory: %s" % target)
+            print(tr("cd: not a directory: %s", "cd: geen map: %s") % target)
             return
         self.prev, self.cwd = self.cwd, full
 
@@ -726,9 +752,13 @@ class Lab:
         elif cmd == "proof":
             self.show_proof()
         elif cmd in ("reset", "new"):
-            what = "restart this exercise from scratch" if cmd == "reset" else "start a NEW random exercise"
-            if not self.confirm("This will %s and wipe ~/work and ~/stock. Continue?" % what):
-                print("cancelled")
+            if cmd == "reset":
+                what = tr("restart this exercise from scratch", "deze oefening helemaal opnieuw starten")
+            else:
+                what = tr("start a NEW random exercise", "een NIEUWE willekeurige oefening starten")
+            if not self.confirm(tr("This will %s and wipe ~/work and ~/stock. Continue?",
+                                   "Dit gaat %s en ~/work en ~/stock wissen. Doorgaan?") % what):
+                print(tr("cancelled", "geannuleerd"))
                 return
             level = self.spec["level"]
             seed = self.spec["seed"] if cmd == "reset" else random.randrange(1, 100000)
@@ -737,41 +767,51 @@ class Lab:
 
     def confirm(self, question):
         try:
-            ans = input(question + " [y/N] ")
+            ans = input(question + tr(" [y/N] ", " [j/N] "))
         except EOFError:
             ans = ""
-        return ans.strip().lower() in ("y", "yes")
+        return ans.strip().lower() in ("y", "yes", "j", "ja")
 
     def show_help(self):
-        print(bold("Available commands"))
+        print(bold(tr("Available commands", "Beschikbare commando's")))
         print("  " + "  ".join(ALLOWED))
-        print(bold("Lab commands"))
-        print("  task    show the exercise again        check   verify your work")
-        print("  hint    one nudge in the right direction reset   same exercise, fresh start")
-        print("  new     a different random exercise     exit    leave the lab")
-        print(bold("Notes"))
-        print("  ~ stands for the lab directory (%s); ~/... counts as an absolute path." % self.root)
-        print("  Wildcards like *.txt work. Pipes, redirection and ; && are off.")
+        print(bold(tr("Lab commands", "Lab-commando's")))
+        rows = [("task", tr("show the exercise again", "toon de oefening opnieuw")),
+                ("check", tr("verify your work", "controleer je werk")),
+                ("hint", tr("one nudge in the right direction", "een duwtje in de goede richting")),
+                ("reset", tr("same exercise, fresh start", "dezelfde oefening, opnieuw beginnen")),
+                ("new", tr("a different random exercise", "een andere willekeurige oefening")),
+                ("exit", tr("leave the lab", "verlaat het lab"))]
+        for name, desc in rows:
+            print("  %-7s %s" % (name, desc))
+        print(bold(tr("Notes", "Opmerkingen")))
+        print(tr("  ~ stands for the lab directory (%s); ~/... counts as an absolute path.",
+                 "  ~ staat voor de labmap (%s); ~/... telt als een absoluut pad.") % self.root)
+        print(tr("  Wildcards like *.txt work. Pipes, redirection and ; && are off.",
+                 "  Wildcards zoals *.txt werken. Pipes, omleidingen en ; && staan uit."))
 
     def annotation(self, rel, n):
         if n["mode"] == "restricted":
-            return yellow("★ no mkdir/touch → copy or move it from ~/%s" % n["source"])
+            return yellow(tr("★ no mkdir/touch → copy or move it from ~/%s",
+                             "★ geen mkdir/touch → kopieer of verplaats het vanuit ~/%s") % n["source"])
         if n["mode"] == "inherit":
-            return dim("(comes along: ~/%s)" % n["source"])
+            return dim(tr("(comes along: ~/%s)", "(komt mee: ~/%s)") % n["source"])
         if n["mode"] == "exists":
-            return dim("(already there)")
+            return dim(tr("(already there)", "(staat er al)"))
         if n["style"] == "abs":
-            return cyan("◆ create it with an ABSOLUTE path")
+            return cyan(tr("◆ create it with an ABSOLUTE path", "◆ maak het aan met een ABSOLUUT pad"))
         if n["style"] == "rel":
-            return magenta("◆ create it with a RELATIVE path")
+            return magenta(tr("◆ create it with a RELATIVE path", "◆ maak het aan met een RELATIEF pad"))
         return ""
 
     def show_task(self):
         s = self.spec
         print()
-        print(bold("═══ Exercise #%d (level %d) ═══" % (s["seed"], s["level"])))
-        print("Lab directory: %s   (shown as ~ in the prompt)" % self.root)
-        print("Make ~/work look EXACTLY like this - nothing more, nothing less:")
+        print(bold(tr("═══ Exercise #%d (level %d) ═══", "═══ Oefening #%d (niveau %d) ═══") % (s["seed"], s["level"])))
+        print(tr("Lab directory: %s   (shown as ~ in the prompt)",
+                 "Labmap: %s   (in de prompt weergegeven als ~)") % self.root)
+        print(tr("Make ~/work look EXACTLY like this - nothing more, nothing less:",
+                 "Zorg dat ~/work er EXACT zo uitziet - niets meer, niets minder:"))
         print()
         rows = [("work/", "")]
         children = {}
@@ -794,36 +834,45 @@ class Lab:
             print("  " + left.ljust(width) + ann)
 
         print()
-        print(bold("Remove from ~/work") + " (everything that is not in the picture above must go):")
+        print(bold(tr("Remove from ~/work", "Verwijder uit ~/work")) +
+              tr(" (everything that is not in the picture above must go):",
+                 " (alles wat niet in bovenstaande afbeelding staat moet weg):"))
         for rel, j in self.junk.items():
             if j.get("child"):
                 continue
             if j["type"] == "file":
-                what = "file"
+                what = tr("file", "bestand")
             elif j["nonempty"]:
-                what = "directory with stuff inside"
+                what = tr("directory with stuff inside", "map met inhoud")
             else:
-                what = "empty directory"
+                what = tr("empty directory", "lege map")
             extra = ""
             if j["rmdir_only"]:
-                extra += "  " + red("rmdir only - no rm!")
+                extra += "  " + red(tr("rmdir only - no rm!", "enkel rmdir - geen rm!"))
             if j["style"] == "abs":
-                extra += "  " + cyan("◆ remove it with an ABSOLUTE path")
+                extra += "  " + cyan(tr("◆ remove it with an ABSOLUTE path", "◆ verwijder het met een ABSOLUUT pad"))
             if j["style"] == "rel":
-                extra += "  " + magenta("◆ remove it with a RELATIVE path")
+                extra += "  " + magenta(tr("◆ remove it with a RELATIVE path", "◆ verwijder het met een RELATIEF pad"))
             print("  ~/%-28s %s%s" % (rel + ("/" if j["type"] == "dir" else ""), what, extra))
         misplaced = [n["source"] for n in self.targets.values()
                      if n["mode"] == "restricted" and n["source"].startswith("work/")]
         if misplaced:
-            print("  " + dim("(items marked ★ that currently live inside ~/work must end up at their new place only)"))
+            print("  " + dim(tr("(items marked ★ that currently live inside ~/work must end up at their new place only)",
+                           "(items met ★ die nu in ~/work staan, mogen enkel op hun nieuwe plaats terechtkomen)")))
         print()
-        print(bold("Rules"))
-        print("  • Commands: %s   (type `help` for the lab commands)" % " ".join(ALLOWED))
-        print("  • " + yellow("★") + " items may NOT be made with mkdir/touch - bring them over with cp or mv.")
-        print("  • " + cyan("◆") + " items must be created/removed with the stated kind of path (~/... is absolute).")
-        print("  • " + red("rmdir only") + " directories may not be removed with rm.")
-        print("  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.")
-        print("  • Type " + bold("check") + " when you think you are done.")
+        print(bold(tr("Rules", "Regels")))
+        print(tr("  • Commands: %s   (type `help` for the lab commands)",
+                 "  • Commando's: %s   (typ `help` voor de lab-commando's)") % " ".join(ALLOWED))
+        print("  • " + yellow("★") + tr(" items may NOT be made with mkdir/touch - bring them over with cp or mv.",
+                                        " items mag je NIET met mkdir/touch maken - breng ze over met cp of mv."))
+        print("  • " + cyan("◆") + tr(" items must be created/removed with the stated kind of path (~/... is absolute).",
+                                      " items moet je aanmaken/verwijderen met het opgegeven soort pad (~/... is absoluut)."))
+        print("  • " + tr("Directories marked ", "Mappen met ") + red(tr("rmdir only", "enkel rmdir")) +
+              tr(" may not be removed with rm.", " mag je niet met rm verwijderen."))
+        print(tr("  • ~/stock may be left in any state. Breaking a rule blocks the command and is counted.",
+                 "  • ~/stock mag in elke toestand blijven. Een regel breken blokkeert het commando en wordt geteld."))
+        print("  • " + tr("Type ", "Typ ") + bold("check") +
+              tr(" when you think you are done.", " wanneer je denkt dat je klaar bent."))
         print()
 
     # ---- verification ----------------------------------------------------
@@ -867,32 +916,38 @@ class Lab:
             print()
             print(bold("── check ──────────────────────────────────────"))
             print((green("✔") if present == len(self.targets) else yellow("•")) +
-                  " %d/%d target items present" % (present, len(self.targets)))
+                  tr(" %d/%d target items present", " %d/%d doelitems aanwezig") % (present, len(self.targets)))
             if missing:
-                print(red("✘ missing (%d):" % len(missing)))
+                print(red(tr("✘ missing (%d):", "✘ ontbreekt (%d):") % len(missing)))
                 for r in missing:
                     print("    ~/%s%s" % (r, "/" if self.targets[r]["type"] == "dir" else ""))
             if wrong_type:
-                print(red("✘ wrong kind (%d):" % len(wrong_type)))
+                print(red(tr("✘ wrong kind (%d):", "✘ verkeerd soort (%d):") % len(wrong_type)))
                 for r in wrong_type:
-                    print("    ~/%s should be a %s" % (r, self.targets[r]["type"]))
+                    kind = self.targets[r]["type"]
+                    print(tr("    ~/%s should be a %s", "    ~/%s moet een %s zijn") % (
+                        r, kind if LANG == "en" else ("map" if kind == "dir" else "bestand")))
             if bad_content:
-                print(red("✘ not the original (%d):" % len(bad_content)))
+                print(red(tr("✘ not the original (%d):", "✘ niet het origineel (%d):") % len(bad_content)))
                 for r in bad_content:
-                    print("    ~/%s is not the original %s from ~/%s (recreated instead of copied/moved?)"
-                          % (r, self.targets[r]["type"], self.targets[r]["source"]))
+                    kind = self.targets[r]["type"]
+                    print(tr("    ~/%s is not the original %s from ~/%s (recreated instead of copied/moved?)",
+                             "    ~/%s is niet het originele %s uit ~/%s (opnieuw aangemaakt in plaats van gekopieerd/verplaatst?)")
+                          % (r, kind if LANG == "en" else ("map" if kind == "dir" else "bestand"),
+                             self.targets[r]["source"]))
             if extra:
-                print(red("✘ should not be there (%d):" % len(extra)))
+                print(red(tr("✘ should not be there (%d):", "✘ hoort er niet te staan (%d):") % len(extra)))
                 for r in extra:
                     print("    ~/%s%s" % (r, "/" if actual[r] == "dir" else ""))
-            print("rule violations: %s   commands run: %d" % (
+            print(tr("rule violations: %s   commands run: %d", "regelovertredingen: %s   uitgevoerde commando's: %d") % (
                 (green("0") if self.state["violations"] == 0 else red(str(self.state["violations"]))),
                 self.state["commands"]))
             if ok:
-                print(green(bold("RESULT: SOLVED ✔")) + ("" if self.state["violations"] == 0 else
-                      yellow("  (but with %d rule violation(s))" % self.state["violations"])))
+                print(green(bold(tr("RESULT: SOLVED ✔", "RESULTAAT: OPGELOST ✔"))) + ("" if self.state["violations"] == 0 else
+                      yellow(tr("  (but with %d rule violation(s))", "  (maar met %d regelovertreding(en))") % self.state["violations"])))
             else:
-                print(yellow("RESULT: not yet - keep going (type `hint` if you are stuck)"))
+                print(yellow(tr("RESULT: not yet - keep going (type `hint` if you are stuck)",
+                                "RESULTAAT: nog niet - ga door (typ `hint` als je vastzit)")))
             print()
         if ok and not self.state["solved"]:
             self.state["solved"] = True
@@ -906,14 +961,17 @@ class Lab:
 
     def show_proof(self):
         if not self.state.get("solved"):
-            print("Not solved yet - the proof code appears once `check` passes.")
+            print(tr("Not solved yet - the proof code appears once `check` passes.",
+                 "Nog niet opgelost - de bewijscode verschijnt zodra `check` slaagt."))
             return
         code = make_proof(self.spec["seed"], self.spec["level"], self.state["violations"], self.state["commands"])
         if not code:
-            print("No proof key configured on this machine, so there is no proof code.")
+            print(tr("No proof key configured on this machine, so there is no proof code.",
+                 "Op deze machine is geen proof-sleutel ingesteld, dus er is geen bewijscode."))
             return
-        print(bold("Proof code: ") + green(code))
-        print(dim("Hand this code in; your teacher can verify it with `fslab --verify %s`." % code))
+        print(bold(tr("Proof code: ", "Bewijscode: ")) + green(code))
+        print(dim(tr("Hand this code in; your teacher can verify it with `fslab --verify %s`.",
+                     "Geef deze code af; je leerkracht kan ze controleren met `fslab --verify %s`.") % code))
 
     def hint(self):
         work = os.path.join(self.root, "work")
@@ -924,30 +982,38 @@ class Lab:
                     actual.add(self.rel(os.path.join(dp, n)))
         for rel, n in self.targets.items():
             if rel not in actual:
-                kind = "directory" if n["type"] == "dir" else "file"
+                kind = tr("directory", "map") if n["type"] == "dir" else tr("file", "bestand")
                 if n["mode"] in ("restricted", "inherit"):
-                    print("Missing: ~/%s (%s). It exists as ~/%s - use cp or mv to bring it over." % (rel, kind, n["source"]))
+                    print(tr("Missing: ~/%s (%s). It exists as ~/%s - use cp or mv to bring it over.",
+                             "Ontbreekt: ~/%s (%s). Het bestaat als ~/%s - gebruik cp of mv om het over te brengen.")
+                          % (rel, kind, n["source"]))
                 else:
                     how = "mkdir" if n["type"] == "dir" else "touch"
-                    style = {"abs": " using an absolute path (starts with / or ~/)",
-                             "rel": " using a relative path (seen from your current directory - `pwd`)",
+                    style = {"abs": tr(" using an absolute path (starts with / or ~/)",
+                                       " met een absoluut pad (begint met / of ~/)"),
+                             "rel": tr(" using a relative path (seen from your current directory - `pwd`)",
+                                       " met een relatief pad (gezien vanuit je huidige map - `pwd`)"),
                              None: ""}[n["style"]]
-                    print("Missing: ~/%s (%s). Create it with %s%s." % (rel, kind, how, style))
+                    print(tr("Missing: ~/%s (%s). Create it with %s%s.",
+                             "Ontbreekt: ~/%s (%s). Maak het aan met %s%s.") % (rel, kind, how, style))
                 return
         for rel in sorted(actual):
             if rel not in self.targets:
                 j = self.junk.get(rel)
                 full = os.path.join(self.root, rel)
                 if j and j["rmdir_only"]:
-                    print("~/%s should not be there. It is empty, so rmdir is the tool." % rel)
+                    print(tr("~/%s should not be there. It is empty, so rmdir is the tool.",
+                             "~/%s hoort er niet te staan. Het is leeg, dus rmdir is het juiste gereedschap.") % rel)
                 elif os.path.isdir(full) and os.listdir(full):
-                    print("~/%s should not be there. It has contents, so rm needs its recursive option." % rel)
+                    print(tr("~/%s should not be there. It has contents, so rm needs its recursive option.",
+                             "~/%s hoort er niet te staan. Er zit inhoud in, dus rm heeft de recursieve optie nodig.") % rel)
                 elif os.path.isdir(full):
-                    print("~/%s should not be there (empty directory)." % rel)
+                    print(tr("~/%s should not be there (empty directory).", "~/%s hoort er niet te staan (lege map).") % rel)
                 else:
-                    print("~/%s should not be there (file) - rm it." % rel)
+                    print(tr("~/%s should not be there (file) - rm it.", "~/%s hoort er niet te staan (bestand) - verwijder het met rm.") % rel)
                 return
-        print("The structure looks complete. Run `check` to verify the details.")
+        print(tr("The structure looks complete. Run `check` to verify the details.",
+                 "De structuur lijkt compleet. Voer `check` uit om de details te controleren."))
 
     # ---- readline --------------------------------------------------------
     def complete(self, text, state):
@@ -1006,7 +1072,7 @@ class Lab:
             try:
                 self.handle(line)
             except SystemExit:
-                print("bye")
+                print(tr("bye", "tot ziens"))
                 return
 
 
@@ -1020,17 +1086,24 @@ def main():
     ap.add_argument("--level", type=int, choices=[1, 2, 3], default=2, help="size of the exercise")
     ap.add_argument("--new", action="store_true", help="discard the saved exercise and start a new one")
     ap.add_argument("--verify", metavar="CODE", help="teacher: verify a proof code and exit")
+    ap.add_argument("--lang", choices=["nl", "en"], help="interface language (default: nl, or $FSLAB_LANG)")
     a = ap.parse_args()
+    if a.lang:
+        global LANG
+        LANG = a.lang
 
     if a.verify:
         if not proof_key():
-            sys.exit("no proof key: set FSLAB_PROOF_KEY or put a proof.key file next to fslab.py")
+            sys.exit(tr("no proof key: set FSLAB_PROOF_KEY or put a proof.key file next to fslab.py",
+                        "geen proof-sleutel: stel FSLAB_PROOF_KEY in of plaats een proof.key-bestand naast fslab.py"))
         info = verify_proof(a.verify)
         if not info:
-            print(red("INVALID") + " - this is not a genuine proof code for this key.")
+            print(red(tr("INVALID", "ONGELDIG")) + tr(" - this is not a genuine proof code for this key.",
+                                                      " - dit is geen echte bewijscode voor deze sleutel."))
             sys.exit(1)
-        print(green("VALID") + "  exercise #%(seed)d (level %(level)d) solved with %(violations)d violation(s) "
-              "in %(commands)d commands" % info)
+        print(green(tr("VALID", "GELDIG")) + tr(
+            "  exercise #%(seed)d (level %(level)d) solved with %(violations)d violation(s) in %(commands)d commands",
+            "  oefening #%(seed)d (niveau %(level)d) opgelost met %(violations)d overtreding(en) in %(commands)d commando's") % info)
         sys.exit(0)
 
     root = os.path.realpath(os.path.abspath(a.root))
@@ -1039,15 +1112,20 @@ def main():
 
     if has_saved and not a.new and a.seed is None:
         lab.load()
-        print(dim("Resuming the saved exercise in %s (use --new for a fresh one)." % root))
+        print(dim(tr("Resuming the saved exercise in %s (use --new for a fresh one).",
+                     "Opgeslagen oefening in %s wordt hervat (gebruik --new voor een nieuwe).") % root))
     else:
         if os.path.isdir(root) and os.listdir(root) and not os.path.isdir(os.path.join(root, ".lab")):
-            sys.exit("%s exists and does not look like a lab directory - refusing to touch it. "
-                     "Pick another place with --root." % root)
+            sys.exit(tr("%s exists and does not look like a lab directory - refusing to touch it. "
+                        "Pick another place with --root.",
+                        "%s bestaat al en lijkt geen labmap - ik blijf er van af. "
+                        "Kies een andere plaats met --root.") % root)
         os.makedirs(root, exist_ok=True)
         lab.start_new(a.seed if a.seed is not None else random.randrange(1, 100000), a.level)
 
-    print(bold("fslab %s" % VERSION) + " - type `task` to see the exercise, `help` for the commands, `check` to verify.")
+    print(bold("fslab %s" % VERSION) + tr(
+        " - type `task` to see the exercise, `help` for the commands, `check` to verify.",
+        " - typ `task` om de oefening te zien, `help` voor de commando's, `check` om te controleren."))
     lab.show_task()
     lab.repl()
 

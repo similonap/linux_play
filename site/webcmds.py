@@ -447,8 +447,9 @@ def runner(cmd, args, cwd):
 # --------------------------------------------------------------------------
 
 class Session:
-    def __init__(self, root, confirm, seed=None, level=2, fresh=False):
+    def __init__(self, root, confirm, seed=None, level=2, fresh=False, lang="nl"):
         fslab.USE_COLOR = True
+        self.set_lang(lang)
         self.lab = fslab.Lab(root)
         self.lab.runner = runner
         self.lab.confirm = confirm
@@ -463,19 +464,26 @@ class Session:
             saved = False
         self.resumed = saved
 
+    def set_lang(self, lang):
+        fslab.LANG = lang if lang in ("nl", "en") else "nl"
+
     def capture(self, fn, *a):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             try:
                 fn(*a)
             except SystemExit:
-                print("This is the browser lab - just close the tab. Your progress is saved.")
+                print(fslab.tr("This is the browser lab - just close the tab. Your progress is saved.",
+                               "Dit is het browser-lab - sluit gewoon het tabblad. Je voortgang wordt bewaard."))
         return buf.getvalue().replace("\r\n", "\n").replace("\n", "\r\n")
 
     def banner(self):
-        head = fslab.bold("fslab %s" % fslab.VERSION) + " - type `task` to see the exercise, `help` for the commands, `check` to verify."
+        head = fslab.bold("fslab %s" % fslab.VERSION) + fslab.tr(
+            " - type `task` to see the exercise, `help` for the commands, `check` to verify.",
+            " - typ `task` om de oefening te zien, `help` voor de commando's, `check` om te controleren.")
         if self.resumed:
-            head += "\n" + fslab.dim("Resuming your saved exercise (use `new` for a fresh one).")
+            head += "\n" + fslab.dim(fslab.tr("Resuming your saved exercise (use `new` for a fresh one).",
+                                              "Je opgeslagen oefening wordt hervat (gebruik `new` voor een nieuwe)."))
         return self.capture(lambda: (print(head), self.lab.show_task()))
 
     def run(self, line):

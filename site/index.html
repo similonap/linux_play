@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="nl">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -35,28 +35,36 @@
   .xterm { height: 100%; }
   footer { padding: 4px 14px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line);
     background: var(--panel); display: flex; gap: 14px; flex-wrap: wrap; }
+  .lang { display: inline-flex; }
+  .lang button { border-radius: 0; padding: 5px 9px; }
+  .lang button:first-child { border-radius: 6px 0 0 6px; }
+  .lang button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+  .lang button.on { background: var(--accent); color: #06182e; border-color: var(--accent); font-weight: 600; }
   @media (max-width: 640px) { header h1 { display: none; } }
 </style>
 </head>
 <body>
 <header>
   <h1>Linux Lab</h1>
-  <span class="chip" id="ex">exercise <b>—</b></span>
-  <span class="chip" id="cmds">commands <b>0</b></span>
-  <span class="chip" id="viol">violations <b>0</b></span>
-  <span class="chip" id="status">not solved</span>
+  <span class="chip" id="ex"></span>
+  <span class="chip" id="cmds"></span>
+  <span class="chip" id="viol"></span>
+  <span class="chip" id="status"></span>
   <span class="spacer"></span>
-  <button class="act" disabled data-cmd="task">Task</button>
-  <button class="act" disabled data-cmd="hint">Hint</button>
-  <button class="act" disabled data-cmd="tree ~">Tree</button>
-  <button class="act primary" disabled data-cmd="check">Check</button>
-  <button class="act" disabled data-cmd="new" title="a different random exercise">New</button>
+  <button class="act" disabled data-cmd="task" data-i18n="btnTask"></button>
+  <button class="act" disabled data-cmd="hint" data-i18n="btnHint"></button>
+  <button class="act" disabled data-cmd="tree ~" data-i18n="btnTree"></button>
+  <button class="act primary" disabled data-cmd="check" data-i18n="btnCheck"></button>
+  <button class="act" disabled data-cmd="new" data-i18n="btnNew" data-i18n-title="btnNewTitle"></button>
+  <span class="lang" role="group" aria-label="Taal / Language">
+    <button id="lang-nl" data-lang="nl">NL</button><button id="lang-en" data-lang="en">EN</button>
+  </span>
 </header>
 <div id="term"></div>
 <footer>
-  <span>Commands: ls pwd cd cp mv touch mkdir rm rmdir tree</span>
-  <span>Lab: task · check · hint · help · reset · new</span>
-  <span id="conn">loading…</span>
+  <span data-i18n="footCmds"></span>
+  <span data-i18n="footLab"></span>
+  <span id="conn"></span>
 </footer>
 
 <script>
@@ -72,7 +80,48 @@
   fit.fit();
   const $ = id => document.getElementById(id);
 
-  let py = null, session = null;
+  // ---- language (NL default) -------------------------------------------------
+  const I18N = {
+    nl: {
+      btnTask: 'Opdracht', btnHint: 'Hint', btnTree: 'Tree', btnCheck: 'Controleer', btnNew: 'Nieuw',
+      btnNewTitle: 'een andere willekeurige oefening',
+      footCmds: "Commando's: ls pwd cd cp mv touch mkdir rm rmdir tree",
+      footLab: 'Lab: task · check · hint · help · reset · new',
+      exercise: 'oefening', level: 'niveau', commands: "commando's", violations: 'overtredingen',
+      solved: 'opgelost ✔', unsolved: 'niet opgelost',
+      loading: 'Python wordt in je browser geladen (de eerste keer duurt dit enkele seconden)…',
+      connLoading: 'laden…', ready: 'klaar · voortgang wordt in deze browser bewaard', error: 'fout',
+      startFail: 'Kon niet starten: ',
+    },
+    en: {
+      btnTask: 'Task', btnHint: 'Hint', btnTree: 'Tree', btnCheck: 'Check', btnNew: 'New',
+      btnNewTitle: 'a different random exercise',
+      footCmds: 'Commands: ls pwd cd cp mv touch mkdir rm rmdir tree',
+      footLab: 'Lab: task · check · hint · help · reset · new',
+      exercise: 'exercise', level: 'level', commands: 'commands', violations: 'violations',
+      solved: 'solved ✔', unsolved: 'not solved',
+      loading: 'Loading Python in your browser (first visit takes a few seconds)…',
+      connLoading: 'loading…', ready: 'ready · progress is saved in this browser', error: 'error',
+      startFail: 'Could not start: ',
+    },
+  };
+  let lang = 'nl';
+  try {
+    const q = params.get('lang'), saved = localStorage.getItem('fslab.lang');
+    lang = ['nl', 'en'].includes(q) ? q : (['nl', 'en'].includes(saved) ? saved : 'nl');
+  } catch (e) {}
+  const t = k => I18N[lang][k];
+
+  function applyLang() {
+    document.documentElement.lang = lang;
+    document.querySelectorAll('[data-i18n]').forEach(el => el.textContent = t(el.dataset.i18n));
+    document.querySelectorAll('[data-i18n-title]').forEach(el => el.title = t(el.dataset.i18nTitle));
+    document.querySelectorAll('.lang button').forEach(b => b.classList.toggle('on', b.dataset.lang === lang));
+    $('conn').textContent = ready ? t('ready') : t('connLoading');
+    if (session) refreshInfo(); else renderInfo(null);
+  }
+
+  let py = null, session = null, ready = false;
   let buf = '', cur = 0, prompt = '', history = [], hIdx = 0, draft = '';
   let busy = true, chain = Promise.resolve();
 
@@ -99,15 +148,32 @@
     await new Promise(res => py.FS.syncfs(false, () => res()));
   }
 
-  function refreshInfo() {
-    const s = JSON.parse(session.info());
-    $('ex').innerHTML = `exercise <b>#${s.seed}</b> · level ${s.level}`;
-    $('cmds').innerHTML = `commands <b>${s.commands}</b>`;
+  function refreshInfo() { renderInfo(JSON.parse(session.info())); }
+  function renderInfo(s) {
+    $('ex').innerHTML = s ? `${t('exercise')} <b>#${s.seed}</b> · ${t('level')} ${s.level}` : `${t('exercise')} <b>—</b>`;
+    $('cmds').innerHTML = `${t('commands')} <b>${s ? s.commands : 0}</b>`;
     const v = $('viol');
-    v.innerHTML = `violations <b>${s.violations}</b>`; v.className = 'chip' + (s.violations ? ' bad' : '');
+    v.innerHTML = `${t('violations')} <b>${s ? s.violations : 0}</b>`;
+    v.className = 'chip' + (s && s.violations ? ' bad' : '');
     const st = $('status');
-    st.textContent = s.solved ? 'solved ✔' : 'not solved'; st.className = 'chip' + (s.solved ? ' ok' : '');
+    st.textContent = s && s.solved ? t('solved') : t('unsolved'); st.className = 'chip' + (s && s.solved ? ' ok' : '');
   }
+
+  function setLang(l) {
+    if (l === lang) return;
+    lang = l;
+    try { localStorage.setItem('fslab.lang', lang); } catch (e) {}
+    if (session) session.set_lang(lang);
+    applyLang();
+    if (session && !busy) {            // redraw the instructions in the new language
+      term.clear();
+      term.write('\x1b[2J\x1b[H' + session.banner());
+      newPrompt();
+    }
+  }
+  document.querySelectorAll('.lang button').forEach(b => b.addEventListener('click', () => {
+    setLang(b.dataset.lang); term.focus();
+  }));
 
   async function submit(line) {
     term.write('\r\n');
@@ -191,7 +257,7 @@
 
   // ---- boot Pyodide ----------------------------------------------------------
   async function boot() {
-    term.write('\x1b[2mLoading Python in your browser (first visit takes a few seconds)…\x1b[0m');
+    term.write('\x1b[2m' + t('loading') + '\x1b[0m');
     py = await loadPyodide();
     for (const f of ['fslab.py', 'webcmds.py']) {
       py.FS.writeFile('/home/pyodide/' + f, await (await fetch(f)).text());
@@ -207,7 +273,7 @@
 import sys, js
 sys.path.insert(0, '/home/pyodide')
 import webcmds
-session = webcmds.Session('/lab', lambda q: js.askConfirm(q), seed=${seed}, level=${level})
+session = webcmds.Session('/lab', lambda q: js.askConfirm(q), seed=${seed}, level=${level}, lang='${lang}')
 webcmds.WIDTH = ${term.cols}
 `);
     session = py.globals.get('session');
@@ -216,12 +282,14 @@ webcmds.WIDTH = ${term.cols}
     term.write(session.banner());
     refreshInfo();
     document.querySelectorAll('button.act').forEach(b => b.disabled = false);
-    $('conn').textContent = 'ready · progress is saved in this browser';
+    ready = true;
+    $('conn').textContent = t('ready');
     busy = false;
     newPrompt();
     term.focus();
   }
-  boot().catch(e => { term.write('\r\n\x1b[31mCould not start: ' + e + '\x1b[0m\r\n'); $('conn').textContent = 'error'; });
+  applyLang();
+  boot().catch(e => { term.write('\r\n\x1b[31m' + t('startFail') + e + '\x1b[0m\r\n'); $('conn').textContent = t('error'); });
 </script>
 </body>
 </html>

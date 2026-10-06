@@ -16,6 +16,7 @@ plus the lab commands `task check hint help reset new clear exit`.
 python3 fslab.py                 # new exercise (or resume the saved one) in ~/linux-lab
 python3 fslab.py --new           # discard the saved exercise, start a fresh random one
 python3 fslab.py --seed 4242     # reproducible: everyone with seed 4242 gets the same task
+python3 fslab.py --lang en       # interface language: nl (default) or en (also $FSLAB_LANG)
 python3 fslab.py --level 1       # 1 = small, 2 = default, 3 = deeper/larger
 python3 fslab.py --root /tmp/lab # use another lab directory
 ```
