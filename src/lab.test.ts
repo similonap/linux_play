@@ -43,8 +43,8 @@ function solveMissions(s: Session): void {
     sh(s, 'cd /');                                 // shortest way to the root
     sh(s, 'cd ~');
   }
+  const n = 'tuseradd';
   if (has('usr-useradd')) {
-    const n = p('usr-useradd').name;
     sh(s, `sudo useradd ${n}`);
     sh(s, `sudo passwd ${n}`);
   }
@@ -59,8 +59,8 @@ function solveMissions(s: Session): void {
     sh(s, 'exit');
   }
   if (has('usr-nohome')) {
-    sh(s, `su ${p('usr-nohome').name}`);
-    sh(s, `cd /home/${p('usr-nohome').name}`);
+    sh(s, `su ${n}`);
+    sh(s, `cd /home/${n}`);
     sh(s, 'exit');
   }
   if (has('usr-root')) { sh(s, 'sudo -i'); sh(s, 'whoami'); sh(s, 'exit'); }

@@ -38,7 +38,6 @@ export interface MissionCtx {
   home: string;       // home of the student (~)
 }
 
-const NEW_USERS = ['eva', 'finn', 'gert', 'hanne', 'ivo', 'jana', 'koen', 'lotte'];
 const GROUP_NAMES = ['studenten', 'docenten', 'labo', 'team', 'alumni', 'projecten', 'beheer', 'gasten'];
 const DIRS = ['/etc', '/var/log', '/usr/share', '/var/lib', '/opt', '/usr/bin', '/var/cache'];
 
@@ -59,12 +58,11 @@ export function makeMissions(rng: Rng, d: Difficulty, f: Features): Mission[] {
   }
   if (f.users) {
     const n = d === 1 ? 2 : 3;
-    const [u] = rng.sample(NEW_USERS, 1);
-    add('usr-useradd', { name: u });
+    add('usr-useradd');
     add('usr-adduser', { n: String(n) });
     add('usr-su-files', { n: String(n) });
     if (d >= 2) { add('usr-su-whoami', { n: String(n) }); add('usr-userdel'); add('usr-root'); }
-    if (d >= 3) add('usr-nohome', { name: u });
+    if (d >= 3) add('usr-nohome');
   }
   if (f.groups) {
     const g = rng.sample(GROUP_NAMES, 5);
@@ -105,16 +103,16 @@ export function missionText(m: Mission): string {
     case 'nav-touch-home': return tr('Create a file in your home directory.', 'Maak een bestand in je home directory.');
     case 'nav-mv-desktop': return tr('Standing in /, move the file from your home directory to the Desktop.',
       'Verplaats vanuit de root directory / het bestand uit je home directory naar de Desktop.');
-    case 'usr-useradd': return tr(`Create the user ${p.name} with useradd and set the password to ${PASSWORD}.`,
-      `Creëer de user ${p.name} met useradd en stel het paswoord in op ${PASSWORD}.`);
+    case 'usr-useradd': return tr(`Create 1 user with useradd (choose the name) and set the password to ${PASSWORD}.`,
+      `Creëer 1 user met useradd (kies zelf de naam) en stel het paswoord in op ${PASSWORD}.`);
     case 'usr-adduser': return tr(`Create ${p.n} users with adduser (choose the names) - password ${PASSWORD} for all of them.`,
       `Creëer ${p.n} users met adduser (kies zelf de namen) - paswoord ${PASSWORD} voor allemaal.`);
     case 'usr-su-whoami': return tr(`Take on the identity of each of those ${p.n} users (su) and check with whoami who you are.`,
       `Neem de identiteit aan van elk van die ${p.n} users (su) en controleer met whoami wie je bent.`);
     case 'usr-su-files': return tr(`As each of those ${p.n} users: go to their home directory (check with pwd) and create 2 files and 1 directory there.`,
       `Ga als elk van die ${p.n} users naar hun home directory (controleer met pwd) en maak daar 2 bestanden en 1 directory.`);
-    case 'usr-nohome': return tr(`Take on the identity of ${p.name} (made with useradd) and try cd /home/${p.name}. What do you notice?`,
-      `Neem de identiteit aan van ${p.name} (gemaakt met useradd) en probeer cd /home/${p.name}. Wat merk je?`);
+    case 'usr-nohome': return tr('Take on the identity of the user you made with useradd and try cd /home/<name>. What do you notice?',
+      'Neem de identiteit aan van de user die je met useradd maakte en probeer cd /home/<naam>. Wat merk je?');
     case 'usr-userdel': return tr('Remove one of your users again with userdel.', 'Verwijder één van je users terug met userdel.');
     case 'usr-root': return tr('Become root with sudo -i, check with whoami and return with exit.',
       'Word root met sudo -i, controleer met whoami en keer terug met exit.');
@@ -149,13 +147,13 @@ export function missionHint(m: Mission): string {
     case 'nav-ls-home-root': return tr('First cd /, then ls home/student or ls /home/student.', 'Doe eerst cd / en dan ls home/student of ls /home/student.');
     case 'nav-touch-home': return tr('touch ~/name (or go home first).', 'touch ~/naam (of ga eerst naar huis).');
     case 'nav-mv-desktop': return tr('cd / first, then mv home/student/<file> home/student/Desktop.', 'Doe eerst cd / en dan mv home/student/<bestand> home/student/Desktop.');
-    case 'usr-useradd': return tr(`sudo useradd ${p.name}  then  sudo passwd ${p.name}`, `sudo useradd ${p.name}  daarna  sudo passwd ${p.name}`);
+    case 'usr-useradd': return tr('sudo useradd <name>  then  sudo passwd <name>', 'sudo useradd <naam>  daarna  sudo passwd <naam>');
     case 'usr-adduser': return tr('sudo adduser <name> (it asks for the password itself).', 'sudo adduser <naam> (het vraagt zelf om het paswoord).');
     case 'usr-su-whoami': return tr('su <name>, then whoami; exit brings you back.', 'su <naam>, dan whoami; met exit kom je terug.');
     case 'usr-su-files': return tr('su <name>, cd ~ (or cd /home/<name>), touch two files, mkdir one directory, exit.',
       'su <naam>, cd ~ (of cd /home/<naam>), touch twee bestanden, mkdir één map, exit.');
-    case 'usr-nohome': return tr(`su ${p.name}, then cd /home/${p.name}. useradd does not create a home directory (unless you give -m).`,
-      `su ${p.name}, dan cd /home/${p.name}. useradd maakt geen home directory aan (tenzij je -m meegeeft).`);
+    case 'usr-nohome': return tr('su <name>, then cd /home/<name>. useradd does not create a home directory (unless you give -m).',
+      'su <naam>, dan cd /home/<naam>. useradd maakt geen home directory aan (tenzij je -m meegeeft).');
     case 'usr-userdel': return tr('sudo userdel <name> (add -r to remove the home directory too).', 'sudo userdel <naam> (met -r verdwijnt ook de home directory).');
     case 'usr-root': return tr('sudo -i, whoami, exit.', 'sudo -i, whoami, exit.');
     case 'grp-create': return tr('sudo groupadd <group>', 'sudo groupadd <groep>');
@@ -200,11 +198,11 @@ export function isDone(m: Mission, c: MissionCtx): boolean {
       && at(e, operands(e)[operands(e).length - 1]).startsWith(c.home + '/Desktop'))
       && c.fs.isDir(c.home + '/Desktop') && c.fs.list(c.home + '/Desktop').some(n => c.fs.isFile(c.home + '/Desktop/' + n));
 
-    case 'usr-useradd': { const u = userBy(c.sys, p.name); return !!u && u.via === 'useradd' && u.password === PASSWORD; }
+    case 'usr-useradd': return c.sys.users.some(u => u.via === 'useradd' && u.password === PASSWORD);
     case 'usr-adduser': return added(c).length >= Number(p.n);
     case 'usr-su-whoami': return added(c).filter(u => ran(e => e.cmd === 'whoami' && e.user === u.name)).length >= Number(p.n);
     case 'usr-su-files': return added(c).filter(u => hasFiles(c, u.name, u.home)).length >= Number(p.n);
-    case 'usr-nohome': return E.some(e => e.user === p.name && e.cmd === 'cd' && e.rc !== 0);
+    case 'usr-nohome': return E.some(e => e.cmd === 'cd' && e.rc !== 0 && userBy(c.sys, e.user)?.via === 'useradd');
     case 'usr-userdel': return ran(e => e.cmd === 'userdel');
     case 'usr-root': {
       const i = E.findIndex(e => e.rc === 0 && e.cmd === 'sudo' && e.raw.includes('-i') && e.user1 === 'root');
